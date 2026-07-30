@@ -43,6 +43,9 @@ def test_auto_discovery_priority():
     """Auto mode tries backends in priority order."""
     from openjarvis.speech._discovery import DISCOVERY_ORDER
 
-    assert DISCOVERY_ORDER[0] == "faster-whisper"
+    # vox-engine leads: it reuses a shared daemon that already holds Whisper in
+    # VRAM, so it is preferred over loading a second copy via faster-whisper.
+    assert DISCOVERY_ORDER[0] == "vox-engine"
+    assert DISCOVERY_ORDER.index("vox-engine") < DISCOVERY_ORDER.index("faster-whisper")
     assert "openai" in DISCOVERY_ORDER
     assert "deepgram" in DISCOVERY_ORDER

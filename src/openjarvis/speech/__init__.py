@@ -15,3 +15,10 @@ for _mod in ("cartesia_tts", "kokoro_tts", "openai_tts"):
         importlib.import_module(f".{_mod}", __name__)
     except ImportError:
         pass
+
+# vox-engine registers BOTH an STT and a TTS backend from a single module,
+# since they share one daemon connection.
+try:
+    importlib.import_module(".vox_engine", __name__)
+except ImportError:
+    pass

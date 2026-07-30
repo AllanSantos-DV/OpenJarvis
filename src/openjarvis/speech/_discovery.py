@@ -9,8 +9,12 @@ if TYPE_CHECKING:
     from openjarvis.core.config import JarvisConfig
     from openjarvis.speech._stubs import SpeechBackend
 
-# Priority order: local first, then cloud
+# Priority order: local first, then cloud.
+# vox-engine leads: it is a shared daemon that already holds a Whisper model in
+# VRAM, so reusing it costs nothing, whereas faster-whisper would load a second
+# copy into this process.
 DISCOVERY_ORDER = [
+    "vox-engine",
     "faster-whisper",
     "openai",
     "deepgram",
@@ -30,7 +34,15 @@ def _create_backend(
     try:
         backend_cls = SpeechRegistry.get(key)
 
-        if key == "faster-whisper":
+        if key == "vox-engine":
+            # Unlike the others, this backend talks to an external daemon that
+            # may simply not be running. Probe it here so auto-discovery falls
+            # through to the next candidate instead of returning a dead backend.
+            backend = backend_cls(language=config.speech.language or "")
+            if not backend.health():
+                return None
+            return backend
+        elif key == "faster-whisper":
             return backend_cls(
                 model_size=config.speech.model,
                 device=config.speech.device,

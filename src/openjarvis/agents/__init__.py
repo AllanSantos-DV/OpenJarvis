@@ -60,6 +60,11 @@ except ImportError:
     pass
 
 try:
+    import openjarvis.agents.copilot_cli  # noqa: F401
+except ImportError:
+    pass
+
+try:
     import openjarvis.agents.operative  # noqa: F401
 except ImportError:
     pass
