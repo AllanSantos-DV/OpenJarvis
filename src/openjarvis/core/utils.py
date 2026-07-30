@@ -9,7 +9,9 @@ from __future__ import annotations
 import platform
 import shutil
 import subprocess
+import sys
 import webbrowser
+from typing import Any
 
 
 def get_python_executable() -> str:
@@ -49,4 +51,37 @@ def open_browser(url: str) -> None:
     webbrowser.open(url)
 
 
-__all__ = ["get_python_executable", "open_browser"]
+def kill_process_tree(proc: Any) -> None:
+    """Best-effort: terminate the FULL process tree, not just the parent,
+    so orphaned child processes (MCP servers, tool subprocesses, installers)
+    don't survive a timeout.
+
+    On Windows this shells out to ``taskkill /PID <pid> /T /F``, which walks
+    down from the given pid and kills every descendant -- ``proc.kill()``
+    alone only signals the immediate child. Never raises: cleanup here is
+    best-effort and must not mask whatever result the caller is about to
+    surface (e.g. a timeout).
+    """
+    pid = getattr(proc, "pid", None)
+    if pid is not None and sys.platform == "win32":
+        try:
+            subprocess.run(
+                ["taskkill", "/PID", str(pid), "/T", "/F"],
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=30,
+            )
+        except Exception:  # noqa: BLE001 -- best-effort, never mask the caller's result
+            pass
+    try:
+        proc.kill()
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        proc.wait(timeout=5)
+    except Exception:  # noqa: BLE001
+        pass
+
+
+__all__ = ["get_python_executable", "open_browser", "kill_process_tree"]

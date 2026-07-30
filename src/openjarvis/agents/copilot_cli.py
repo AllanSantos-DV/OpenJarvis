@@ -30,6 +30,7 @@ from typing import Any, List, Optional
 from openjarvis.agents._stubs import AgentContext, AgentResult, BaseAgent
 from openjarvis.core.events import EventBus
 from openjarvis.core.registry import AgentRegistry
+from openjarvis.core.utils import kill_process_tree
 from openjarvis.engine._stubs import InferenceEngine
 
 logger = logging.getLogger(__name__)
@@ -102,12 +103,14 @@ def _split_answer(stdout: str) -> tuple[str, dict[str, str]]:
 class CopilotCliAgent(BaseAgent):
     """Agent that delegates every turn to the GitHub Copilot CLI.
 
-    Each :meth:`run` spawns ``copilot -p <prompt> --allow-all-tools``. The first
-    call starts a fresh CLI session; later calls reuse it via ``--resume`` so the
-    conversation keeps its context (and benefits from prompt caching).
+    Each :meth:`run` spawns ``copilot -p <prompt> --no-ask-user``. The first
+    call starts a fresh CLI session; later calls reuse it via ``--resume`` so
+    the conversation keeps its context (and benefits from prompt caching).
 
-    ``--allow-all-tools`` is mandatory: the CLI refuses to run non-interactively
-    without it.
+    Secure by default: with no extra configuration the CLI is launched with
+    ``--available-tools=`` (an empty set, zero tools visible). The blanket
+    ``--allow-all-tools`` flag is **never** added unless the caller explicitly
+    passes ``allow_all_tools=True`` to the constructor.
     """
 
     agent_id = "copilot_cli"
@@ -129,6 +132,11 @@ class CopilotCliAgent(BaseAgent):
         allowed_dirs: Optional[List[str]] = None,
         no_ask_user: bool = True,
         timeout: int = 300,
+        available_tools: Optional[List[str]] = None,
+        excluded_tools: Optional[List[str]] = None,
+        allow_tools: Optional[List[str]] = None,
+        deny_tools: Optional[List[str]] = None,
+        allow_all_tools: bool = False,
     ) -> None:
         super().__init__(
             engine,
@@ -144,15 +152,55 @@ class CopilotCliAgent(BaseAgent):
         self._no_ask_user = no_ask_user
         self._timeout = timeout
 
+        self._allow_all_tools = allow_all_tools
+        self._available_tools = (
+            list(available_tools) if available_tools is not None else []
+        )
+        self._excluded_tools = list(excluded_tools or [])
+        self._allow_tools = list(allow_tools or [])
+        self._deny_tools = list(deny_tools or [])
+
+        if allow_all_tools:
+            if available_tools is not None:
+                raise ValueError(
+                    "allow_all_tools=True is contradictory with an explicit "
+                    "available_tools list: one grants every tool, the other "
+                    "restricts to a fixed set. Pick one."
+                )
+            if "*" in self._deny_tools:
+                raise ValueError(
+                    "allow_all_tools=True is contradictory with deny_tools=['*']: "
+                    "one grants every tool, the other denies everything."
+                )
+
     @property
     def session_id(self) -> str:
         """CLI session id of the ongoing conversation ("" before the first run)."""
         return self._session_id
 
     def _build_command(self, prompt: str) -> List[str]:
-        """Assemble the ``copilot`` argv for one turn."""
+        """Assemble the ``copilot`` argv for one turn.
+
+        Secure by default: unless ``allow_all_tools=True`` was explicitly
+        requested, the CLI is launched with ``--available-tools=`` (an empty
+        set, zero tools visible) rather than the blanket ``--allow-all-tools``.
+        No permission is ever inferred from ``prompt`` -- only from the
+        agent's own constructor-time configuration.
+        """
         cmd = [_resolve_binary() or "copilot", "-p", prompt]
-        cmd += ["--allow-all-tools", "--no-color"]
+
+        if self._allow_all_tools:
+            cmd.append("--allow-all-tools")
+        else:
+            cmd.append(f"--available-tools={','.join(self._available_tools)}")
+        if self._excluded_tools:
+            cmd.append(f"--excluded-tools={','.join(self._excluded_tools)}")
+        for tool in self._allow_tools:
+            cmd += ["--allow-tool", tool]
+        for tool in self._deny_tools:
+            cmd += ["--deny-tool", tool]
+
+        cmd += ["--no-color"]
         cmd += ["--log-level", "none"]
 
         if self._session_id:
@@ -167,6 +215,30 @@ class CopilotCliAgent(BaseAgent):
             cmd += ["--add-dir", directory]
 
         return cmd
+
+    def _spawn(self, cmd: List[str]) -> "subprocess.CompletedProcess[str]":
+        """Run ``cmd`` to completion, enforcing ``self._timeout``.
+
+        Uses :func:`subprocess.Popen` (not :func:`subprocess.run`) so the
+        spawned pid is available for :func:`~openjarvis.core.utils.kill_process_tree`
+        if the timeout fires -- ``subprocess.run`` only ever kills the
+        immediate child, orphaning any MCP/tool subprocesses it spawned.
+        """
+        proc = subprocess.Popen(
+            cmd,
+            cwd=self._workspace,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+        )
+        try:
+            stdout, stderr = proc.communicate(timeout=self._timeout)
+        except subprocess.TimeoutExpired:
+            kill_process_tree(proc)
+            raise
+        return subprocess.CompletedProcess(cmd, proc.returncode, stdout, stderr)
 
     def run(
         self,
@@ -190,15 +262,7 @@ class CopilotCliAgent(BaseAgent):
             )
 
         try:
-            proc = subprocess.run(
-                self._build_command(input),
-                cwd=self._workspace,
-                capture_output=True,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
-                timeout=self._timeout,
-            )
+            proc = self._spawn(self._build_command(input))
         except subprocess.TimeoutExpired:
             self._emit_turn_end(turns=1, error=True)
             return AgentResult(
