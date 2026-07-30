@@ -34,7 +34,7 @@ class _FakeClient:
 
     def transcribe_file(self, audio, **kwargs):
         self.calls.append(("transcribe_file", kwargs))
-        return {"text": "ok", "segments": []}
+        return "ok"
 
     def tts(self, text, **kwargs):
         self.calls.append(("tts", {"text": text, **kwargs}))
@@ -65,7 +65,7 @@ def test_health_reflects_daemon_readiness():
 
 
 def test_health_is_false_when_daemon_is_missing(monkeypatch):
-    monkeypatch.setattr("openjarvis.speech.vox_engine._connect", lambda: None)
+    monkeypatch.setattr("openjarvis.speech.vox_engine._connect", lambda **kw: None)
     assert VoxEngineSpeechBackend().health() is False
     assert VoxEngineTTSBackend().health() is False
 
@@ -88,7 +88,7 @@ def test_available_voices_reads_daemon_not_hardcoded():
 
 
 def test_available_voices_empty_when_daemon_unreachable(monkeypatch):
-    monkeypatch.setattr("openjarvis.speech.vox_engine._connect", lambda: None)
+    monkeypatch.setattr("openjarvis.speech.vox_engine._connect", lambda **kw: None)
     assert VoxEngineTTSBackend().available_voices() == []
 
 
@@ -130,17 +130,57 @@ def test_transcribe_uses_transcribe_file_for_long_audio():
     client = _FakeClient()
     stt = _attach(VoxEngineSpeechBackend(), client)
 
-    stt.transcribe([0.0], language="pt")
+    result = stt.transcribe([0.0], language="pt")
 
     name, kwargs = client.calls[0]
     assert name == "transcribe_file"
     assert kwargs["lang"] == "pt"
+    assert result == {"text": "ok"}
+
+
+def test_transcribe_passes_profile_only_when_set():
+    """Without a profile the engine picks its own fast default."""
+    client = _FakeClient()
+    stt = _attach(VoxEngineSpeechBackend(), client)
+
+    stt.transcribe([0.0])
+    assert "profile" not in client.calls[0][1]
+
+    stt.transcribe([0.0], profile="transcription_hq")
+    assert client.calls[1][1]["profile"] == "transcription_hq"
+
+
+def test_health_probe_never_installs(monkeypatch):
+    """A discovery health check must not trigger an install/first model load."""
+    seen = {}
+
+    def _fake_connect(*, autostart):
+        seen["autostart"] = autostart
+        return None
+
+    monkeypatch.setattr("openjarvis.speech.vox_engine._connect", _fake_connect)
+
+    assert VoxEngineTTSBackend().health() is False
+    assert seen["autostart"] is False
+
+
+def test_real_work_allows_the_sdk_to_boot_the_engine(monkeypatch):
+    seen = {}
+
+    def _fake_connect(*, autostart):
+        seen["autostart"] = autostart
+        return _FakeClient(tts_result=({"format": "wav"}, b"RIFF"))
+
+    monkeypatch.setattr("openjarvis.speech.vox_engine._connect", _fake_connect)
+
+    VoxEngineTTSBackend().synthesize("oi")
+    assert seen["autostart"] is True
 
 
 def test_missing_daemon_raises_actionable_error(monkeypatch):
-    monkeypatch.setattr("openjarvis.speech.vox_engine._connect", lambda: None)
+    monkeypatch.setattr("openjarvis.speech.vox_engine._connect", lambda **kw: None)
 
-    with pytest.raises(RuntimeError, match="vox-engine daemon is not available"):
+    with pytest.raises(RuntimeError, match="vox-engine is not available"):
         VoxEngineTTSBackend().synthesize("oi")
 
 

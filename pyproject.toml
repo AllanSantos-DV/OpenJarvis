@@ -218,6 +218,10 @@ markers = [
 [tool.ruff]
 target-version = "py310"
 src = ["src", "tests"]
+# Vendored third-party SDKs are byte-identical copies of their canonical source
+# (upstream ships a drift check that compares them), so they must never be
+# reformatted or fixed here — any edit would break that verification.
+extend-exclude = ["src/openjarvis/speech/_vendor"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "W"]
