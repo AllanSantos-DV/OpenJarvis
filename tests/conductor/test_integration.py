@@ -23,10 +23,11 @@ from openjarvis.conductor.policy import EligibilityPolicy, TierPolicy
 from openjarvis.conductor.runner import (
     StartupError,
     check_credentials,
+    main,
     run,
 )
 from openjarvis.conductor.runtime_lock import FileRuntimeLock
-from openjarvis.conductor.service import ConductorService, ResumeResult
+from openjarvis.conductor.service import ConductorService, ResumeResult, TickReport
 from openjarvis.conductor.state import SqliteClaimStore
 from openjarvis.tools.copilot_sessions import CopilotSessionsTool
 
@@ -392,6 +393,70 @@ def test_no_shadow_configured_does_not_block(session_store, tmp_path):
         claims.close()
 
     assert report.acted == 1
+
+
+def test_a_failing_canary_stops_the_launch(monkeypatch, capsys):
+    """The canary has to STOP things, not just say something.
+
+    A first version printed the warning and started the loop anyway -- the very
+    failure it was built to catch, one level up: the check existed and nothing
+    acted on it. An alarm nobody obeys is decoration.
+    """
+    from openjarvis.conductor import runner as module
+    from openjarvis.conductor.canary import CanaryReport
+
+    monkeypatch.setattr(module, "check_credentials", lambda **kw: None)
+    monkeypatch.setattr(
+        "openjarvis.conductor.canary.run_canary",
+        lambda **kw: CanaryReport(warnings=["os MCP nao executam"]),
+    )
+    # If the gate fails to stop, this blows up loudly instead of quietly passing.
+    monkeypatch.setattr(
+        module,
+        "build_service",
+        lambda **kw: pytest.fail("launched despite a failing canary"),
+    )
+
+    assert main([]) == 2
+    assert "ambiente mudou" in capsys.readouterr().err
+
+
+def test_a_failing_canary_still_allows_observing(monkeypatch):
+    """--dry-run writes nothing, so a broken environment cannot do harm.
+
+    Refusing here would leave the owner unable to LOOK at what is wrong.
+    """
+    from openjarvis.conductor import runner as module
+    from openjarvis.conductor.canary import CanaryReport
+
+    built = {}
+    monkeypatch.setattr(module, "check_credentials", lambda **kw: None)
+    monkeypatch.setattr(
+        "openjarvis.conductor.canary.run_canary",
+        lambda **kw: CanaryReport(warnings=["os MCP nao executam"]),
+    )
+    monkeypatch.setattr(
+        module, "build_service", lambda **kw: built.setdefault("yes", True)
+    )
+    monkeypatch.setattr(module, "run", lambda *a, **k: TickReport())
+
+    assert main(["--dry-run"]) == 0
+    assert built.get("yes") is True
+
+
+def test_a_healthy_canary_lets_the_launch_through(monkeypatch):
+    from openjarvis.conductor import runner as module
+    from openjarvis.conductor.canary import CanaryReport
+
+    monkeypatch.setattr(module, "check_credentials", lambda **kw: None)
+    monkeypatch.setattr(
+        "openjarvis.conductor.canary.run_canary",
+        lambda **kw: CanaryReport(notes=["tudo certo"]),
+    )
+    monkeypatch.setattr(module, "build_service", lambda **kw: object())
+    monkeypatch.setattr(module, "run", lambda *a, **k: TickReport())
+
+    assert main([]) == 0
 
 
 def test_runner_refuses_a_second_conductor(session_store, tmp_path):

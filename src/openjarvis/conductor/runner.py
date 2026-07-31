@@ -252,10 +252,22 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             # Before touching a session: is the environment still what the last
             # run relied on? The suite cannot see the CLI, the bridge or the
             # store, and CI has none of them -- so the check happens here.
+            #
+            # And it STOPS the launch. A first version printed the warning and
+            # started the loop anyway, which is the same failure it was built to
+            # prevent, one level up: the check existed and nothing acted on it.
+            # An alarm nobody obeys is decoration.
             from openjarvis.conductor.canary import run_canary
 
             canary = run_canary()
             print(f"jarvis-conductor: {canary.summary()}")
+            if not canary.ok and not args.dry_run:
+                raise StartupError(
+                    "O ambiente mudou e responder sessoes agora faria trabalho "
+                    "pela metade, calado. Corrija o que esta acima, ou rode com "
+                    "--dry-run para so observar (ou --no-canary se for a propria "
+                    "checagem que esta errada)."
+                )
 
         service = build_service(
             own_session_id=args.own_session_id,

@@ -57,9 +57,12 @@ comando em vez de implícita.
 
 ## Achados de ambiente (custaram caro, valem para qualquer automação do CLI)
 
-1. **Prompt com quebra de linha faz o `--resume` abrir sessão NOVA** em vez de anexar.
-   Isolado com mesma sessão/cwd/env/argv: 1 linha anexa, 5 linhas cria outra. Guard:
-   `test_default_prompt_is_a_single_line`.
+1. **~~Prompt com quebra de linha faz o `--resume` abrir sessão NOVA~~** — **crença
+   retirada**. A causa era quebra de linha **no argv**; quando o prompt passou a ir por
+   **stdin** (para furar o teto de 8191 chars do Windows), o problema sumiu na raiz.
+   Medido depois: prompt deliberadamente multi-linha **anexa corretamente**.
+   O guard de uma-linha continua, barato, porque voltar para argv é um refactor de
+   distância — mas a explicação antiga estava errada.
 2. **`--available-tools=` vazio é silenciosamente ignorado** — o CLI aceita e executa
    ferramenta assim mesmo. O que bloqueia é `--excluded-tools=<nomes>` **+**
    `--disable-builtin-mcps`; sem o segundo, o agente dá a volta pelo MCP do GitHub.
