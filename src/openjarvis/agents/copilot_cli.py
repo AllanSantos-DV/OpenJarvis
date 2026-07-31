@@ -163,6 +163,7 @@ class CopilotCliAgent(BaseAgent):
         allow_tools: Optional[List[str]] = None,
         deny_tools: Optional[List[str]] = None,
         allow_all_tools: bool = False,
+        sandboxed: bool = True,
         env: Optional[dict] = None,
     ) -> None:
         super().__init__(
@@ -181,6 +182,7 @@ class CopilotCliAgent(BaseAgent):
         self._env = dict(env) if env else None
 
         self._allow_all_tools = allow_all_tools
+        self._sandboxed = sandboxed
         self._available_tools = (
             list(available_tools) if available_tools is not None else []
         )
@@ -226,7 +228,14 @@ class CopilotCliAgent(BaseAgent):
             # `--disable-builtin-mcps` -- with just the built-ins excluded, the
             # agent routed around them through the GitHub MCP server and read the
             # tree anyway. With both, the session answers that it cannot comply.
-            if self._available_tools:
+            if not self._sandboxed:
+                # Resuming a session the owner already created: it keeps the
+                # tools he granted it. Stripping them would leave the session
+                # unable to continue its own work, which is the whole point of
+                # resuming it. The conductor limits blast radius by choosing
+                # WHICH sessions it answers, not by crippling them.
+                pass
+            elif self._available_tools:
                 cmd.append(f"--available-tools={','.join(self._available_tools)}")
             else:
                 cmd.append(f"--excluded-tools={','.join(_SANDBOXED_TOOLS)}")

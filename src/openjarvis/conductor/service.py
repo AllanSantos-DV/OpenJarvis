@@ -171,14 +171,12 @@ class TickReport:
 #: read himself: where it stopped, what it needs, and whether it can proceed.
 #: Handing real autonomy back is a separate, explicit step.
 DEFAULT_PROMPT = (
-    "O Jarvis esta verificando esta sessao em nome do dono, que nao esta olhando "
+    "O Jarvis esta retomando esta sessao em nome do dono, que nao esta olhando "
     "agora.\n"
-    "NAO execute ferramentas e NAO altere arquivos: apenas relate, com base no "
-    "historico DESTA conversa.\n"
-    "Responda em ate 5 linhas: (1) onde o trabalho parou, (2) qual e a proxima "
-    "acao concreta, (3) se voce consegue seguir sozinho ou precisa de uma decisao "
-    "do dono -- e, nesse caso, qual e a pergunta objetiva.\n"
-    "Se a conversa nao tiver trabalho pendente, responda apenas: NADA PENDENTE.\n"
+    "Continue de onde parou, seguindo o plano ja combinado NESTA conversa.\n"
+    "Se houver uma decisao que so o dono pode tomar, NAO adivinhe: pare e "
+    "responda com a pergunta objetiva.\n"
+    "Se nao houver trabalho pendente, responda apenas: NADA PENDENTE.\n"
     "{next_steps}"
 )
 

@@ -448,3 +448,24 @@ def test_explicit_allowlist_replaces_the_deny_list(monkeypatch):
     cmd = _agent(available_tools=["view"])._build_command("oi")
 
     assert "--available-tools=view" in cmd
+
+
+def test_resuming_the_owners_session_keeps_its_tools(monkeypatch):
+    """Stripping tools from a resumed session defeats the purpose of resuming it.
+
+    The session belongs to the owner and already holds the permissions he granted
+    when he opened it; it has to be able to finish that work. The conductor limits
+    blast radius by choosing WHICH sessions it answers, not by disarming them.
+    """
+    monkeypatch.setattr(
+        "openjarvis.agents.copilot_cli._resolve_binary", lambda: "copilot"
+    )
+    cmd = CopilotCliAgent(
+        None, "auto", temperature=0.7, max_tokens=1024,
+        session_id="abc", sandboxed=False,
+    )._build_command("continue")
+
+    assert not any(c.startswith("--excluded-tools=") for c in cmd)
+    assert "--disable-builtin-mcps" not in cmd
+    assert "--allow-all-tools" not in cmd
+    assert "--resume=abc" in cmd

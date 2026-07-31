@@ -156,6 +156,11 @@ class CopilotCliResumeExecutor:
             session_id=session_id,
             timeout=timeout or self._timeout,
             available_tools=self._available_tools,
+            # The owner's session keeps the tools he granted it: it has to be
+            # able to finish its own work. Safety here comes from choosing
+            # which sessions to answer (eligibility + tier + approval), not
+            # from disarming a session the owner already trusts.
+            sandboxed=False,
             env=self._env,
         )
 
