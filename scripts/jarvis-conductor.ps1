@@ -21,7 +21,11 @@
     are only logged instead of spoken.
 
 .EXAMPLE
-    .\jarvis-conductor.ps1 -DryRun
+    .\jarvis-conductor.ps1
+    Conducts: answers trivial turns inside the default scope, queues the rest.
+
+.EXAMPLE
+    .\jarvis-conductor.ps1 -ReportOnly
     Shows which sessions would be resumed without sending anything.
 
 .EXAMPLE
@@ -34,11 +38,15 @@ param(
     [int]$Limit = 10,
     [double]$Interval = 0,
     [string[]]$AllowedRoot = @(),
-    [switch]$DryRun,
+    # Observe without answering. `-DryRun` is kept as an alias because the
+    # earlier name is in the owner's muscle memory.
+    [Alias('DryRun')]
+    [switch]$ReportOnly,
     [switch]$Quiet,
     [switch]$InstallShortcut,
-    # Opt-in: without it the conductor only reports, never answers on its own.
-    [switch]$AutoAnswer,
+    # Print the exact runner invocation and exit, so "what will this shortcut
+    # do?" has an answer that does not require running it.
+    [switch]$PrintPlan,
     [string]$LogLevel = 'INFO'
 )
 
@@ -64,6 +72,45 @@ if ($InstallShortcut) {
     $shortcut.Save()
     Write-Host "jarvis-conductor: shortcut created at $linkPath" -ForegroundColor Green
     exit 0
+}
+
+# --- what this invocation will do ------------------------------------------
+# Built before the probes so `-PrintPlan` can answer "what does this shortcut
+# do?" on any machine, without a token or the CLI installed.
+$arguments = @(
+    '-m', 'openjarvis.conductor.runner',
+    '--idle-minutes', $IdleMinutes,
+    '--limit', $Limit,
+    '--interval', $Interval,
+    '--log-level', $LogLevel
+)
+# The shortcut carries no arguments, and a click on an icon named "Jarvis
+# Conductor" IS the consent to conduct. Forcing report-mode there would not be
+# a safety measure, it would be shipping a product that never does its job.
+#
+# What the default DOES restrain is scope and reach:
+#   * scope -- without -AllowedRoot, only sessions under the projects folder
+#     that holds this checkout. Scoping to the checkout itself would be tighter
+#     and useless: the sessions worth conducting are the sibling projects;
+#   * reach -- the tier gate still holds. Trivial turns are answered; anything
+#     sensitive is queued for the owner's approval and announced out loud.
+if (-not $AllowedRoot -or $AllowedRoot.Count -eq 0) {
+    $AllowedRoot = @(Split-Path -Parent (Split-Path -Parent $repoRoot))
+}
+foreach ($root in $AllowedRoot) { $arguments += @('--allowed-root', $root) }
+if ($ReportOnly) { $arguments += '--dry-run' }
+
+if ($PrintPlan) {
+    Write-Output "$python $($arguments -join ' ')"
+    exit 0
+}
+
+$scope = $AllowedRoot -join ', '
+if ($ReportOnly) {
+    Write-Host 'jarvis-conductor: modo relatorio -- nada sera respondido.' -ForegroundColor Yellow
+} else {
+    Write-Host "jarvis-conductor: conduzindo em $scope. Trivial responde; o resto pede sua aprovacao." -ForegroundColor Green
+    Write-Host 'jarvis-conductor: use -ReportOnly para so observar.' -ForegroundColor DarkGray
 }
 
 # --- probe: interpreter -----------------------------------------------------
@@ -101,29 +148,6 @@ if (-not $Quiet) {
         $Quiet = $true
     }
 }
-
-$arguments = @(
-    '-m', 'openjarvis.conductor.runner',
-    '--idle-minutes', $IdleMinutes,
-    '--limit', $Limit,
-    '--interval', $Interval,
-    '--log-level', $LogLevel
-)
-# Safety defaults for the desktop shortcut, which carries no arguments:
-#   * without -AllowedRoot the conductor could answer sessions in ANY folder;
-#   * without -AutoAnswer every idle session gets answered unattended.
-# Both are opt-in, so a plain double-click observes and reports instead.
-if (-not $AllowedRoot -or $AllowedRoot.Count -eq 0) {
-    $AllowedRoot = @(Split-Path -Parent $repoRoot)
-    Write-Host "jarvis-conductor: escopo limitado a $($AllowedRoot[0]) (use -AllowedRoot para ampliar)." -ForegroundColor Yellow
-}
-if (-not $AutoAnswer -and -not $DryRun) {
-    Write-Host "jarvis-conductor: modo relatorio (use -AutoAnswer para deixar responder)." -ForegroundColor Yellow
-    $DryRun = $true
-}
-
-foreach ($root in $AllowedRoot) { $arguments += @('--allowed-root', $root) }
-if ($DryRun) { $arguments += '--dry-run' }
 if ($Quiet) { $arguments += '--quiet' }
 
 Push-Location $repoRoot
