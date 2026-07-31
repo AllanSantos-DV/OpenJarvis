@@ -126,9 +126,11 @@ if ($version -notin @('3.10','3.11','3.12','3.13')) {
 if (-not (Get-Command copilot -ErrorAction SilentlyContinue)) {
     Fail 'Copilot CLI not on PATH. Install it with: npm install -g @github/copilot'
 }
-if (-not $env:GH_TOKEN -and -not $env:GITHUB_TOKEN) {
-    Fail 'No GH_TOKEN or GITHUB_TOKEN in this shell. The CLI needs the subscription token.'
-}
+# The token is NOT checked here. The desktop shortcut opens a clean shell, and
+# the subscription token is injected by the Copilot app into ITS OWN process --
+# it is not a user-level variable, so demanding it made the shortcut fail on a
+# machine that works fine. The runner probes the real capability instead (one
+# trivial prompt) and explains both fixes when it genuinely cannot authenticate.
 
 # --- probe: singleton (early, readable message) -----------------------------
 $lockFile = Join-Path $env:USERPROFILE '.jarvis-conductor\conductor.lock'

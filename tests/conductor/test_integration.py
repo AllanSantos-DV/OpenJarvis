@@ -233,13 +233,34 @@ def test_conductor_writes_nothing_into_the_app_store(session_store, tmp_path):
 
 
 def test_runner_refuses_to_start_without_a_token():
-    with pytest.raises(StartupError, match="GH_TOKEN"):
+    with pytest.raises(StartupError, match="autenticar"):
         check_credentials({})
 
 
-def test_runner_accepts_either_token_variable():
+def test_an_ambient_token_is_enough_without_probing():
     check_credentials({"GH_TOKEN": "x"})
     check_credentials({"GITHUB_TOKEN": "y"})
+
+
+def test_a_working_login_is_enough_without_a_token(monkeypatch):
+    """The shortcut opens a clean shell and can never have that variable.
+
+    The token is injected by the Copilot app into ITS process -- it is not a
+    user-level variable. Demanding it rejected a machine where `copilot login`
+    had already stored a credential, which is the supported setup.
+    """
+    from openjarvis.conductor import runner as module
+
+    monkeypatch.setattr(module, "_cli_authenticates", lambda: True)
+    check_credentials({}, probe=True)
+
+
+def test_a_cli_that_cannot_authenticate_is_refused(monkeypatch):
+    from openjarvis.conductor import runner as module
+
+    monkeypatch.setattr(module, "_cli_authenticates", lambda: False)
+    with pytest.raises(StartupError, match="copilot login"):
+        check_credentials({}, probe=True)
 
 
 def test_a_bounded_loop_runs_every_tick(session_store, tmp_path):

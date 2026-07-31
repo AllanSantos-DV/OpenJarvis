@@ -11,6 +11,7 @@ from __future__ import annotations
 import argparse
 import logging
 import os
+import shutil
 import sys
 import time
 from typing import Optional, Sequence
@@ -24,23 +25,82 @@ from openjarvis.conductor.state import SqliteClaimStore
 
 logger = logging.getLogger(__name__)
 
-#: The CLI authenticates from the ambient token; without it every resume fails.
+#: The CLI authenticates from the ambient token OR from a credential the owner
+#: stored with `copilot login`. Checking for the variable alone rejects a
+#: perfectly working setup.
 _TOKEN_VARS = ("GH_TOKEN", "GITHUB_TOKEN")
+
+#: A trivial prompt: enough to prove the CLI can authenticate and spend, cheap
+#: enough to run before every launch.
+_AUTH_PROBE = "Responda somente: ok"
+_AUTH_TIMEOUT = 90
 
 
 class StartupError(RuntimeError):
     """Raised when the conductor must not start at all."""
 
 
-def check_credentials(env: Optional[dict] = None) -> None:
-    """Fail before ticking if the Copilot CLI has no token to authenticate with."""
+def check_credentials(env: Optional[dict] = None, *, probe: bool = False) -> None:
+    """Fail before ticking if the Copilot CLI cannot authenticate.
+
+    Two ways it can. An ambient ``GH_TOKEN``/``GITHUB_TOKEN``, or a credential
+    the owner stored with ``copilot login``. An earlier version demanded the
+    variable and nothing else, which rejected a working machine: the desktop
+    shortcut opens a clean shell, and that token is injected by the Copilot app
+    into ITS process -- it is not a user-level variable, so the shortcut could
+    never have it.
+
+    That is the same mistake as probing a port instead of the process that
+    should own it: testing for a SYMPTOM of the capability rather than the
+    capability. With ``probe=True`` the check spends one trivial prompt and
+    learns the answer for real.
+    """
     source = os.environ if env is None else env
-    if not any(source.get(name) for name in _TOKEN_VARS):
-        raise StartupError(
-            "No GH_TOKEN or GITHUB_TOKEN in the environment. The Copilot CLI "
-            "authenticates from it, so every resume would fail. Launch the "
-            "conductor from a shell that has the subscription token."
+    has_var = any(source.get(name) for name in _TOKEN_VARS)
+
+    if probe and _cli_authenticates():
+        return
+    if has_var:
+        return
+
+    raise StartupError(
+        "O Copilot CLI nao conseguiu autenticar. Duas saidas:\n"
+        "  1) rode `copilot login` uma vez -- a credencial fica no cofre do "
+        "Windows e o atalho passa a funcionar sozinho;\n"
+        "  2) ou inicie o conductor de um shell que tenha GH_TOKEN/GITHUB_TOKEN "
+        "da conta com assinatura.\n"
+        "Sem isso a sessao cai numa conta sem cota e todo resume falha."
+    )
+
+
+def _cli_authenticates() -> bool:
+    """Whether ``copilot`` can actually answer right now.
+
+    Cheap and decisive: a machine without quota answers "You have exceeded your
+    monthly quota" instead of the prompt, which is exactly the failure this is
+    meant to catch before a whole tick is wasted on it.
+    """
+    import subprocess
+
+    binary = shutil.which("copilot")
+    if not binary:
+        return False
+    try:
+        out = subprocess.run(
+            [binary, "-p", _AUTH_PROBE, "--no-ask-user", "--no-color"],
+            capture_output=True,
+            text=True,
+            timeout=_AUTH_TIMEOUT,
+            encoding="utf-8",
+            errors="replace",
         )
+    except Exception:  # noqa: BLE001 -- a failed probe is not proof of failure
+        logger.debug("auth probe could not run", exc_info=True)
+        return False
+    combined = f"{out.stdout or ''}{out.stderr or ''}".lower()
+    if "quota" in combined or "unauthor" in combined or "not logged in" in combined:
+        return False
+    return "ok" in (out.stdout or "").lower()
 
 
 
@@ -178,7 +238,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     )
 
     try:
-        check_credentials()
+        check_credentials(probe=True)
         service = build_service(
             own_session_id=args.own_session_id,
             idle_minutes=args.idle_minutes,
