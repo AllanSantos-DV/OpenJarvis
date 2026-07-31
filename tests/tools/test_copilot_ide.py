@@ -161,6 +161,42 @@ def test_unknown_action_lists_the_real_ones():
     assert "open" in result.content and "send" in result.content
 
 
+def test_open_carries_the_mcp_servers(spy, tmp_path, monkeypatch):
+    """The guarantee has to live at the CALLSITE, not just in the helper.
+
+    A headless child silently gets no MCP servers. The helper that fixes it can
+    stay perfectly correct while a refactor drops the flag from the launch --
+    and the failure is invisible: the session starts, looks fine, and quietly
+    cannot reach half its tools.
+    """
+    monkeypatch.setattr(
+        copilot_ide, "mcp_flags", lambda *a, **k: ["--additional-mcp-config=@x"]
+    )
+    seen = spy()
+    CopilotIdeTool().execute(action="open", prompt="tarefa", cwd=str(tmp_path))
+
+    assert "--additional-mcp-config=@x" in seen["argv"]
+
+
+def test_send_carries_the_mcp_servers(spy, monkeypatch):
+    # Resuming loses them just as easily as opening does.
+    monkeypatch.setattr(
+        copilot_ide, "mcp_flags", lambda *a, **k: ["--additional-mcp-config=@x"]
+    )
+    seen = spy()
+    CopilotIdeTool().execute(action="send", session_id=SID, prompt="continue", cwd=".")
+
+    assert "--additional-mcp-config=@x" in seen["argv"]
+
+
+def test_no_servers_means_no_flag_at_the_callsite(spy, tmp_path, monkeypatch):
+    monkeypatch.setattr(copilot_ide, "mcp_flags", lambda *a, **k: [])
+    seen = spy()
+    CopilotIdeTool().execute(action="open", prompt="tarefa", cwd=str(tmp_path))
+
+    assert not any("additional-mcp-config" in part for part in seen["argv"])
+
+
 def test_send_without_a_session_id_is_refused():
     result = CopilotIdeTool().execute(action="send", prompt="continue")
     assert not result.success

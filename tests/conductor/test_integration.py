@@ -17,6 +17,7 @@ from datetime import datetime, timedelta, timezone
 import pytest
 
 from openjarvis.conductor.adapters import CopilotSessionsReader
+from openjarvis.conductor.mirror import ShadowVerdict
 from openjarvis.conductor.models import RetryPolicy
 from openjarvis.conductor.policy import EligibilityPolicy, TierPolicy
 from openjarvis.conductor.runner import (
@@ -264,6 +265,112 @@ def test_a_bounded_loop_runs_every_tick(session_store, tmp_path):
 
     # Three ticks ran; the first answered, the rest found nothing new to do.
     assert len(cli.calls) == 1
+
+
+def test_the_shadow_blocks_a_turn_before_it_is_sent(session_store, tmp_path):
+    """The brake that replaced check_unattended -- and must actually brake.
+
+    Removing the old guard without wiring this one left the loop writing into
+    real sessions with nothing reviewing it. What matters is not that a shadow
+    exists as a library: it is that a NO stops the turn from being sent.
+    """
+
+    class _Refuses:
+        def review(self, **kwargs):
+            return ShadowVerdict(False, "sessao fez uma pergunta direta ao dono")
+
+    cli = FakeCli(session_store)
+    service, claims = _service(session_store, tmp_path, cli, shadow=_Refuses())
+    try:
+        report = service.tick()
+    finally:
+        claims.close()
+
+    assert cli.calls == []  # nothing was sent
+    assert report.acted == 0
+    assert "sombra" in report.pending[0].detail
+
+
+def test_a_blocked_turn_stays_available(session_store, tmp_path):
+    """Blocking must not burn the turn.
+
+    An objection is "not now", not "never". If the block consumed the attempt,
+    a session the owner then unblocked would sit there unanswered with a
+    backoff nobody asked for.
+    """
+
+    class _RefusesThenAllows:
+        def __init__(self):
+            self.calls = 0
+
+        def review(self, **kwargs):
+            self.calls += 1
+            if self.calls == 1:
+                return ShadowVerdict(False, "ambiguo demais")
+            return ShadowVerdict(True)
+
+    shadow = _RefusesThenAllows()
+    cli = FakeCli(session_store)
+    service, claims = _service(session_store, tmp_path, cli, shadow=shadow)
+    try:
+        service.tick()
+        report = service.tick()
+    finally:
+        claims.close()
+
+    assert shadow.calls == 2
+    assert report.acted == 1
+    assert len(cli.calls) == 1
+
+
+def test_an_unreachable_shadow_blocks(session_store, tmp_path):
+    """Failing open would rebuild the exact hole this closes.
+
+    A reviewer that cannot answer is indistinguishable from no reviewer -- and
+    the whole point is that nobody is watching.
+    """
+
+    class _Broken:
+        def review(self, **kwargs):
+            raise RuntimeError("quota estourada")
+
+    cli = FakeCli(session_store)
+    service, claims = _service(session_store, tmp_path, cli, shadow=_Broken())
+    try:
+        report = service.tick()
+    finally:
+        claims.close()
+
+    assert cli.calls == []
+    assert "indisponivel" in report.pending[0].detail
+
+
+def test_the_shadow_lets_routine_work_through(session_store, tmp_path):
+    class _Allows:
+        def review(self, **kwargs):
+            return ShadowVerdict(True, "rotina com proximo passo claro")
+
+    cli = FakeCli(session_store)
+    service, claims = _service(session_store, tmp_path, cli, shadow=_Allows())
+    try:
+        report = service.tick()
+    finally:
+        claims.close()
+
+    assert report.acted == 1
+    assert len(cli.calls) == 1
+
+
+def test_no_shadow_configured_does_not_block(session_store, tmp_path):
+    # A conductor the owner drives by hand needs no critic: he is the brake.
+    cli = FakeCli(session_store)
+    service, claims = _service(session_store, tmp_path, cli)
+    try:
+        report = service.tick()
+    finally:
+        claims.close()
+
+    assert report.acted == 1
 
 
 def test_runner_refuses_a_second_conductor(session_store, tmp_path):

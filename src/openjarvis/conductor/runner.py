@@ -55,6 +55,7 @@ def build_service(
     dry_run: bool = False,
     speak: bool = True,
     resume_timeout: int = 120,
+    shadow: bool = True,
 ) -> ConductorService:
     """Wire the real adapters into the pure service."""
     from openjarvis.conductor.adapters import (
@@ -65,6 +66,7 @@ def build_service(
         NativeJavaObservationRecorder,
         VoiceNotifier,
     )
+    from openjarvis.conductor.mirror import SessionShadow
     from openjarvis.conductor.service import ResumeResult
 
     class _DryRunExecutor:
@@ -98,6 +100,10 @@ def build_service(
         # A session that stalled asking gets the owner's own autonomy panel
         # turned on instead of having its questions answered one by one.
         promotion=PromotionPolicy(),
+        # The brake. Nobody is watching what this loop writes into real
+        # sessions, so something has to ask "should this be answered now?"
+        # before each turn goes out. A dry run needs none -- it writes nothing.
+        shadow=None if (dry_run or not shadow) else SessionShadow(),
         approvals=ApprovalStoreGate(),
         notifier=notifier,
         observation_recorder=None if dry_run else NativeJavaObservationRecorder(),
@@ -154,6 +160,15 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     parser.add_argument("--resume-timeout", type=int, default=120)
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--quiet", action="store_true", help="do not speak results")
+    parser.add_argument(
+        "--no-shadow",
+        action="store_true",
+        help=(
+            "run WITHOUT the shadow review. Only for a run the owner is "
+            "watching -- unattended, the shadow is the only thing between the "
+            "loop and a wrong turn in a real session."
+        ),
+    )
     parser.add_argument("--log-level", default="INFO")
     args = parser.parse_args(argv)
 
@@ -174,6 +189,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             dry_run=args.dry_run,
             speak=not args.quiet,
             resume_timeout=args.resume_timeout,
+            shadow=not args.no_shadow,
         )
         report = run(
             service,

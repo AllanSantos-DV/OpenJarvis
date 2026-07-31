@@ -61,6 +61,21 @@ _SHADOW_PROMPT = (
     "texto antes ou depois. PADROES PROPOSTOS: "
 )
 
+_SESSION_SHADOW_PROMPT = (
+    "Voce e o SOMBRA do Jarvis. O Jarvis vai mandar um turno para a sessao "
+    "descrita abaixo AGORA, SEM ninguem olhando. Sua unica pergunta e: e "
+    "seguro deixar? REPROVE quando: a sessao fez uma PERGUNTA DIRETA ao dono "
+    "(decisao dele, nao do agente); esta no meio de algo destrutivo ou "
+    "irreversivel (migracao, deploy, apagar dados, mexer em producao, "
+    "credenciais, chaves); parece travada repetindo o mesmo erro (responder "
+    "so aprofunda o buraco); ou o contexto e ambiguo demais para agir sem o "
+    "dono. APROVE quando for continuacao de trabalho de rotina com proximo "
+    "passo claro. Na duvida, REPROVE: uma resposta adiada custa minutos, uma "
+    "resposta errada em sessao real custa o trabalho. Responda SOMENTE um "
+    'JSON no formato {"aprovado":true,"motivo":"..."} -- sem texto antes ou '
+    "depois. O motivo deve ser uma frase curta em portugues. SESSAO: "
+)
+
 
 @dataclass
 class Pattern:
@@ -310,4 +325,90 @@ def _as_dialogue(turns: Sequence[Dict[str, Any]]) -> str:
     return " ".join(lines)
 
 
-__all__ = ["MirrorShadow", "Pattern", "ReflectionResult"]
+@dataclass
+class ShadowVerdict:
+    """The shadow's answer on whether one session should be answered now."""
+
+    approved: bool
+    reason: str = ""
+
+
+class SessionShadow:
+    """The brake on the unattended loop: a second opinion before writing.
+
+    ``MirrorShadow`` above learns how the owner works, over time. This is the
+    other half and the urgent one: before the conductor sends a turn into a REAL
+    session with nobody watching, something has to ask *should it?*
+
+    It is deliberately narrow. It does not judge the work, it judges whether
+    this is a moment to act unattended -- a session mid-migration, one that just
+    asked the owner a direct question, one touching production. Those are the
+    cases where a helpful answer is worse than silence.
+
+    Blocking is cheap: the turn stays available and the owner sees it queued.
+    Answering wrongly is not.
+    """
+
+    def __init__(
+        self, *, agent_factory: Optional[Any] = None, timeout: int = 180
+    ) -> None:
+        self._agent_factory = agent_factory
+        self._timeout = timeout
+
+    def review(
+        self,
+        *,
+        session_id: str,
+        summary: str = "",
+        cwd: str = "",
+        last_turn: str = "",
+        next_steps: str = "",
+    ) -> ShadowVerdict:
+        answer = self._ask(
+            _SESSION_SHADOW_PROMPT
+            + json.dumps(
+                {
+                    "resumo": summary[:400],
+                    "pasta": cwd,
+                    "ultima_resposta": last_turn[:800],
+                    "proximos_passos": next_steps[:400],
+                },
+                ensure_ascii=False,
+            )
+        )
+        payload = _parse_json(answer)
+        if payload is None:
+            # Unparseable is not permission. The reviewer failing silently is
+            # indistinguishable from no reviewer at all.
+            return ShadowVerdict(False, "sombra respondeu de forma ilegivel")
+        approved = bool(payload.get("aprovado"))
+        return ShadowVerdict(approved, str(payload.get("motivo") or ""))
+
+    def _ask(self, prompt: str) -> str:
+        agent = (self._agent_factory or self._default_agent)()
+        result = agent.run(prompt)
+        if result.metadata.get("error"):
+            raise RuntimeError(result.content)
+        return result.content or ""
+
+    def _default_agent(self):
+        from openjarvis.agents.copilot_cli import CopilotCliAgent
+        from openjarvis.conductor.adapters import UNATTENDED_ENV
+
+        # Judging, not doing: no tools, and the hook env a headless child needs.
+        return CopilotCliAgent(
+            None,
+            "auto",
+            timeout=self._timeout,
+            sandboxed=True,
+            env=dict(UNATTENDED_ENV),
+        )
+
+
+__all__ = [
+    "MirrorShadow",
+    "Pattern",
+    "ReflectionResult",
+    "SessionShadow",
+    "ShadowVerdict",
+]

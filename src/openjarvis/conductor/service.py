@@ -215,6 +215,7 @@ class ConductorService:
         prompt_template: str = DEFAULT_PROMPT,
         auto_tiers: Sequence[str] = (TIER_TRIVIAL,),
         promotion: Optional[PromotionPolicy] = None,
+        shadow: Optional[Any] = None,
         readback_seconds: float = 120.0,
         readback_interval: float = 1.0,
     ) -> None:
@@ -231,6 +232,7 @@ class ConductorService:
         self._prompt_template = prompt_template
         self._auto_tiers = tuple(auto_tiers)
         self._promotion = promotion
+        self._shadow = shadow
         self._readback_seconds = readback_seconds
         self._readback_interval = readback_interval
 
@@ -359,6 +361,24 @@ class ConductorService:
         if self._promote_if_stuck(claim, snapshot, detail, report):
             return
 
+        blocked = self._shadow_objects(snapshot, detail)
+        if blocked:
+            # The shadow is a BRAKE, not a report. It runs here -- after the
+            # claim, before the turn is sent -- because the whole point of an
+            # unattended loop is that nobody is watching what it writes into a
+            # real session. Releasing (not failing) keeps the attempt: the
+            # session was not answered, so the turn stays available once the
+            # objection is dealt with.
+            self._claims.release(claim.key, claim.claim_token, reason=blocked)
+            report.pending.append(
+                TickOutcome(snapshot.session_id, "pending", f"sombra: {blocked}")
+            )
+            self._notify(
+                f"O sombra barrou uma resposta na sessao {snapshot.session_id[:8]}: "
+                f"{blocked}"
+            )
+            return
+
         prompt = self._prompt_template.format(
             next_steps=(
                 f"Ultimo checkpoint registrado: {detail.next_steps}"
@@ -406,6 +426,40 @@ class ConductorService:
             return
 
         self._complete_success(claim, snapshot, tier, result, report)
+
+    def _shadow_objects(self, snapshot: SessionSnapshot, detail: SessionDetail) -> str:
+        """Ask the shadow whether answering this session is a bad idea.
+
+        Returns the objection, or "" to proceed.
+
+        No shadow configured means no objection -- a conductor the owner drives
+        by hand does not need one, because he IS the brake. The unattended loop
+        wires one; that is where it matters.
+
+        A shadow that cannot answer BLOCKS. Failing open here would recreate
+        precisely the hole that removing the old guard left: a loop writing into
+        real sessions with nothing reviewing it, and no sign that the review
+        never happened.
+        """
+        shadow = self._shadow
+        if shadow is None:
+            return ""
+        last = detail.last_turn.assistant_response if detail.last_turn else ""
+        try:
+            verdict = shadow.review(
+                session_id=snapshot.session_id,
+                summary=snapshot.summary,
+                cwd=snapshot.cwd,
+                last_turn=last,
+                next_steps=detail.next_steps,
+            )
+        except Exception as exc:  # noqa: BLE001 -- an unreachable critic is a block
+            logger.warning("shadow review failed for %s: %s", snapshot.session_id, exc)
+            return f"revisao indisponivel ({type(exc).__name__})"
+
+        if verdict is None:
+            return "revisao sem resposta"
+        return "" if verdict.approved else (verdict.reason or "sem motivo declarado")
 
     def _complete_success(
         self,

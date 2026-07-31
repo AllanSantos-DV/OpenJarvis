@@ -291,6 +291,34 @@ def test_the_prompt_never_reaches_argv():
     assert "--yolo" not in cmd
 
 
+def test_a_resumed_session_carries_the_mcp_servers(monkeypatch):
+    """Resuming the owner's session must not silently strip its MCP tools.
+
+    A headless child gets no MCP servers by default -- the CLI reads a config
+    that is empty here, because the owner's servers live in the mcp-bridge, an
+    extension of the app. Answering a session with fewer tools than it had is
+    the kind of failure nobody notices until the work is already worse.
+    """
+    import openjarvis.tools.mcp_bridge_config as mcp
+
+    monkeypatch.setattr(
+        mcp, "mcp_flags", lambda *a, **k: ["--additional-mcp-config=@x"]
+    )
+    assert "--additional-mcp-config=@x" in _agent(sandboxed=False)._build_command()
+
+
+def test_a_sandboxed_session_does_not_get_mcp_servers(monkeypatch):
+    # A fresh session the conductor opens itself was granted nothing yet; the
+    # sandbox exists precisely to keep it that way.
+    import openjarvis.tools.mcp_bridge_config as mcp
+
+    monkeypatch.setattr(
+        mcp, "mcp_flags", lambda *a, **k: ["--additional-mcp-config=@x"]
+    )
+    cmd = _agent(sandboxed=True)._build_command()
+    assert not any("additional-mcp-config" in part for part in cmd)
+
+
 def test_the_prompt_is_delivered_on_stdin(monkeypatch):
     seen = {}
 
