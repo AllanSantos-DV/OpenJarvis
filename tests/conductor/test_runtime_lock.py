@@ -1,9 +1,19 @@
-"""Runtime singleton guard: only one conductor may run at a time."""
+"""Runtime singleton guard: only one conductor may run at a time.
+
+The lock is the operating system's, which changes what is worth testing. There
+is no stale state to reclaim and no liveness to probe -- the kernel releases the
+lock when the holder dies, so a crashed conductor cannot block the machine and a
+recycled pid cannot be mistaken for a live one. Those were problems of the
+hand-rolled version this replaced.
+"""
 
 from __future__ import annotations
 
-import json
 import os
+import subprocess
+import sys
+import textwrap
+import time
 
 import pytest
 
@@ -20,6 +30,7 @@ def test_second_conductor_cannot_acquire(tmp_path):
     assert second.acquire() is False
     assert first.held is True
     assert second.held is False
+    first.release()
 
 
 def test_release_lets_the_next_process_in(tmp_path):
@@ -30,43 +41,33 @@ def test_release_lets_the_next_process_in(tmp_path):
 
     first.release()
 
+    assert first.held is False
     assert second.acquire() is True
+    second.release()
 
 
 def test_acquire_is_idempotent_for_the_holder(tmp_path):
-    lock = FileRuntimeLock(tmp_path / "conductor.lock")
+    path = tmp_path / "conductor.lock"
+    lock = FileRuntimeLock(path)
+
     assert lock.acquire() is True
     assert lock.acquire() is True
+    lock.release()
 
 
-def test_release_without_holding_is_safe(tmp_path):
+def test_release_without_acquire_is_harmless(tmp_path):
     FileRuntimeLock(tmp_path / "conductor.lock").release()
 
 
-def test_stale_lock_from_a_dead_process_is_reclaimed(tmp_path, monkeypatch):
-    """A crashed conductor must not block the machine forever."""
+def test_the_lock_names_its_holder(tmp_path):
+    """Diagnostics only -- nothing decides anything from this."""
     path = tmp_path / "conductor.lock"
-    path.write_text("999999", encoding="utf-8")
-
-    monkeypatch.setattr(
-        "openjarvis.conductor.runtime_lock._pid_alive", lambda pid: False
-    )
-
     lock = FileRuntimeLock(path)
-    assert lock.acquire() is True
-    # Ownership transferred: the file now names THIS process.
-    assert lock._read_owner()[0] == os.getpid()
-
-
-def test_lock_held_by_a_live_process_is_respected(tmp_path, monkeypatch):
-    path = tmp_path / "conductor.lock"
-    path.write_text("999999", encoding="utf-8")
-
-    monkeypatch.setattr(
-        "openjarvis.conductor.runtime_lock._pid_alive", lambda pid: True
-    )
-
-    assert FileRuntimeLock(path).acquire() is False
+    lock.acquire()
+    try:
+        assert lock.owner() == os.getpid()
+    finally:
+        lock.release()
 
 
 def test_context_manager_refuses_to_start_a_second_conductor(tmp_path):
@@ -81,73 +82,48 @@ def test_context_manager_refuses_to_start_a_second_conductor(tmp_path):
         pass
 
 
-def test_corrupt_lock_file_is_treated_as_stale(tmp_path, monkeypatch):
-    path = tmp_path / "conductor.lock"
-    path.write_text("not-a-pid", encoding="utf-8")
+def test_a_dead_holder_leaves_nothing_behind(tmp_path):
+    """The whole reason for using the OS lock rather than a pid file.
 
-    assert FileRuntimeLock(path).acquire() is True
+    A conductor that dies without releasing must not block the machine. The
+    hand-rolled version needed a liveness probe and a start-time comparison to
+    survive pid recycling; the kernel drops this lock when the process exits, so
+    there is no stale state to reason about at all.
 
-
-def test_a_recycled_pid_does_not_hold_the_lock_forever(tmp_path, monkeypatch):
-    """The pid in a stale lock can belong to an unrelated process later.
-
-    The OS recycles pid numbers. A conductor that crashed leaves its number
-    behind, and something else eventually gets it -- at which point a pid-only
-    check reads "still running" and orchestration is dead on this machine until
-    a human deletes a file. Not hypothetical: a stale pid from this project was
-    found already reassigned.
+    Proven by killing a real process, because that is the only way to prove it.
     """
-    from openjarvis.conductor import runtime_lock as module
-
     path = tmp_path / "conductor.lock"
-    path.write_text(
-        json.dumps({"pid": 4242, "started": "quando o conductor rodou"}),
-        encoding="utf-8",
+    script = textwrap.dedent(
+        f"""
+        import time
+        from openjarvis.conductor.runtime_lock import FileRuntimeLock
+        lock = FileRuntimeLock({str(path)!r})
+        assert lock.acquire()
+        print("held", flush=True)
+        time.sleep(60)
+        """
     )
-
-    # The number is alive again -- as a different process.
-    monkeypatch.setattr(module, "_pid_alive", lambda pid: True)
-    monkeypatch.setattr(module, "_start_time", lambda pid: "outro processo, depois")
-
-    assert FileRuntimeLock(path).acquire() is True
-
-
-def test_the_real_owner_still_holds_the_lock(tmp_path, monkeypatch):
-    from openjarvis.conductor import runtime_lock as module
-
-    path = tmp_path / "conductor.lock"
-    path.write_text(
-        json.dumps({"pid": 4242, "started": "o mesmo instante"}), encoding="utf-8"
+    child = subprocess.Popen(
+        [sys.executable, "-c", script],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
     )
+    try:
+        assert child.stdout.readline().strip() == "held"
+        # While it lives, nobody else gets in.
+        assert FileRuntimeLock(path).acquire() is False
+    finally:
+        child.kill()
+        child.wait(timeout=15)
 
-    monkeypatch.setattr(module, "_pid_alive", lambda pid: True)
-    monkeypatch.setattr(module, "_start_time", lambda pid: "o mesmo instante")
+    # The kernel releases the lock as the process is torn down, which is not
+    # instantaneous on Windows -- `wait` returns before the handle is gone.
+    taken = FileRuntimeLock(path)
+    for _ in range(40):
+        if taken.acquire():
+            break
+        time.sleep(0.25)
 
-    assert FileRuntimeLock(path).acquire() is False
-
-
-def test_an_unknown_start_time_is_respected(tmp_path, monkeypatch):
-    """Unknown identity must not free a live lock.
-
-    Being wrong this way costs one skipped tick. Being wrong the other way runs
-    two conductors and answers the same session twice.
-    """
-    from openjarvis.conductor import runtime_lock as module
-
-    path = tmp_path / "conductor.lock"
-    path.write_text("4242", encoding="utf-8")  # old format: bare pid
-
-    monkeypatch.setattr(module, "_pid_alive", lambda pid: True)
-    monkeypatch.setattr(module, "_start_time", lambda pid: "")
-
-    assert FileRuntimeLock(path).acquire() is False
-
-
-def test_an_old_bare_pid_lock_is_still_readable(tmp_path, monkeypatch):
-    from openjarvis.conductor import runtime_lock as module
-
-    path = tmp_path / "conductor.lock"
-    path.write_text("4242", encoding="utf-8")
-    monkeypatch.setattr(module, "_pid_alive", lambda pid: False)
-
-    assert FileRuntimeLock(path).acquire() is True
+    assert taken.held is True
+    taken.release()
