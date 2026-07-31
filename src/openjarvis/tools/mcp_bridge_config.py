@@ -50,6 +50,8 @@ from typing import Any, Dict, List, Optional, Tuple
 logger = logging.getLogger(__name__)
 
 #: Where the mcp-bridge extension keeps the owner's servers.
+#: A change to this file triggers the pre-push contract gate -- these are the
+#: paths where a regression is invisible to CI.
 BRIDGE_CONFIG = Path.home() / ".copilot" / "mcp-bridge" / "config.json"
 
 #: Transports the CLI understands in an ``--additional-mcp-config`` payload.
