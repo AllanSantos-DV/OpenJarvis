@@ -1,4 +1,4 @@
-"""Carry the owner's MCP servers into a headless session.
+"""Carry the owner's MCP servers into a headless session -- usable, not just visible.
 
 Measured, and the reason this exists: a headless ``copilot`` child keeps its
 built-in tools but gets **no MCP servers at all**. The CLI reads
@@ -6,17 +6,21 @@ built-in tools but gets **no MCP servers at all**. The CLI reads
 servers live in the **mcp-bridge**, an extension of the *app*. No app, no
 bridge, no MCP.
 
-The failure is silent, which is what makes it dangerous: the session starts
-fine, looks healthy, and only falls over later when it reaches for a tool that
-is not there. A session opened to do work would simply do less of it, quietly.
+The failure is silent, which is what makes it dangerous: the session starts,
+looks healthy, and only falls over later when it reaches for a tool that is not
+there. A session opened to do work would simply do less of it, quietly.
 
-So every headless launch gets ``--additional-mcp-config`` built from the
-bridge's own config. That flag is *additive and per-invocation*: populating the
-global ``mcp-config.json`` instead would make the app and the CLI connect to the
-same servers in parallel whenever the IDE is open.
+Two flags are needed, not one. ``--additional-mcp-config`` makes the servers
+exist; ``--allow-tool=<server>`` makes them callable. Also measured: with only
+the config, the session LISTS the tools and then dies on invocation with
+*"Permission denied and could not request permission from user"* -- a headless
+child runs with ``--no-ask-user`` and has nobody to ask. A tool the agent can
+see and plan around, but cannot call, is worse than one that was never there.
 
-Servers needing OAuth are skipped. A headless child has no browser and nobody to
-approve a consent screen, so it would stall on a login it cannot complete.
+The config flag is additive and per-invocation on purpose: populating the global
+``mcp-config.json`` would make the app and the CLI connect to the same servers
+in parallel whenever the IDE is open. Permission is granted per SERVER and only
+for servers the owner already configured -- nothing here widens what he had.
 """
 
 from __future__ import annotations
@@ -26,7 +30,7 @@ import logging
 import os
 import tempfile
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -37,23 +41,21 @@ BRIDGE_CONFIG = Path.home() / ".copilot" / "mcp-bridge" / "config.json"
 _SUPPORTED = ("http", "sse", "local", "stdio")
 
 
-def _usable(server: Dict[str, Any]) -> bool:
-    """Whether a bridge entry can serve a headless child.
-
-    Disabled entries are out by definition. So is anything needing OAuth: a
-    headless child has no browser, so it would block on a consent screen nobody
-    is there to click.
-
-    An entry with no URL and no command is out too -- the bridge resolves some
-    servers through its own engine, which does not exist outside the app.
-    """
+def _why_unusable(server: Dict[str, Any]) -> str:
+    """Why a bridge entry cannot serve a headless child, or "" when it can."""
     if not server.get("enabled", True):
-        return False
+        return "desligado no bridge"
     if (server.get("auth") or {}).get("type") == "oauth":
-        return False
-    if str(server.get("type") or "").lower() not in _SUPPORTED:
-        return False
-    return bool(server.get("url") or server.get("command"))
+        # No browser here, so it would block on a consent screen nobody clicks.
+        return "exige login pelo navegador"
+    kind = str(server.get("type") or "").lower()
+    if kind not in _SUPPORTED:
+        return f"transporte nao suportado ({kind or 'sem tipo'})"
+    if not (server.get("url") or server.get("command")):
+        # The bridge resolves some servers through its own engine, which has no
+        # address outside the app -- there is nothing for a child to dial.
+        return "so existe dentro do app"
+    return ""
 
 
 def _translate(server: Dict[str, Any]) -> Dict[str, Any]:
@@ -72,8 +74,12 @@ def _translate(server: Dict[str, Any]) -> Dict[str, Any]:
     return entry
 
 
-def build_config(source: Optional[Path] = None) -> Dict[str, Any]:
-    """Read the bridge's servers and return a CLI-shaped ``mcpServers`` map.
+def read_bridge(source: Optional[Path] = None) -> Tuple[Dict[str, Any], List[str]]:
+    """Return ``(mcpServers, excluded)`` from the bridge config.
+
+    The exclusions are returned, not merely logged, so a caller can SAY what a
+    session will be missing. A tool that is simply absent is the failure this
+    module exists to stop being silent, and a log line nobody reads is silence.
 
     Never raises. A missing or malformed bridge config means "no extra servers",
     which is the state a headless child would have had anyway -- refusing to
@@ -84,27 +90,36 @@ def build_config(source: Optional[Path] = None) -> Dict[str, Any]:
         raw = json.loads(path.read_text(encoding="utf-8"))
     except FileNotFoundError:
         logger.debug("no mcp-bridge config at %s", path)
-        return {"mcpServers": {}}
+        return {"mcpServers": {}}, []
     except (OSError, json.JSONDecodeError) as exc:
         logger.warning("mcp-bridge config unreadable (%s): %s", path, exc)
-        return {"mcpServers": {}}
+        return {"mcpServers": {}}, [f"(config ilegivel: {exc})"]
 
     servers: Dict[str, Any] = {}
-    skipped: List[str] = []
+    excluded: List[str] = []
     for server in raw.get("servers", []):
         name = str(server.get("name") or "").strip()
         if not name:
             continue
-        if _usable(server):
-            servers[name] = _translate(server)
+        reason = _why_unusable(server)
+        if reason:
+            excluded.append(f"{name} ({reason})")
         else:
-            skipped.append(name)
+            servers[name] = _translate(server)
 
-    if skipped:
-        # Say which ones are missing. A tool that is simply absent is the exact
-        # failure mode this module exists to stop being silent.
-        logger.info("MCP servers not carried into headless: %s", ", ".join(skipped))
-    return {"mcpServers": servers}
+    if excluded:
+        logger.info("MCP servers not carried into headless: %s", ", ".join(excluded))
+    return {"mcpServers": servers}, excluded
+
+
+def build_config(source: Optional[Path] = None) -> Dict[str, Any]:
+    """The ``mcpServers`` map alone, for callers that do not need the omissions."""
+    return read_bridge(source)[0]
+
+
+def excluded_servers(source: Optional[Path] = None) -> List[str]:
+    """Servers that will NOT reach a headless session, each with its reason."""
+    return read_bridge(source)[1]
 
 
 def write_config(
@@ -114,7 +129,7 @@ def write_config(
 
     Returning None rather than an empty file is deliberate: the caller can then
     leave the flag off entirely instead of pointing the CLI at a config that
-    grants nothing.
+    grants nothing, which looks like configuration that exists.
     """
     payload = build_config(source)
     if not payload["mcpServers"]:
@@ -130,10 +145,33 @@ def write_config(
     return str(path)
 
 
-def mcp_flags(directory: Optional[str] = None) -> List[str]:
-    """The ``--additional-mcp-config`` argv fragment, or empty when unavailable."""
-    path = write_config(directory)
-    return [f"--additional-mcp-config=@{path}"] if path else []
+def mcp_flags(
+    directory: Optional[str] = None, *, source: Optional[Path] = None
+) -> List[str]:
+    """The argv fragment that makes the owner's MCP servers work in a child.
+
+    Both flags or neither: config without permission yields tools that list and
+    then refuse to run.
+    """
+    payload, _ = read_bridge(source)
+    servers = list(payload["mcpServers"])
+    if not servers:
+        return []
+
+    path = write_config(directory, source=source)
+    if not path:
+        return []
+
+    return [f"--additional-mcp-config=@{path}"] + [
+        f"--allow-tool={name}" for name in servers
+    ]
 
 
-__all__ = ["BRIDGE_CONFIG", "build_config", "mcp_flags", "write_config"]
+__all__ = [
+    "BRIDGE_CONFIG",
+    "build_config",
+    "excluded_servers",
+    "mcp_flags",
+    "read_bridge",
+    "write_config",
+]
