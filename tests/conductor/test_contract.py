@@ -42,12 +42,7 @@ CREATE TABLE session_files (
 
 @pytest.mark.contract
 def test_copilot_cli_output_contract_with_disposable_profile(tmp_path):
-    if os.environ.get("RUN_COPILOT_CONTRACT") != "1":
-        pytest.skip("set RUN_COPILOT_CONTRACT=1 to spend real Copilot quota")
-    if not (os.environ.get("GH_TOKEN") or os.environ.get("GITHUB_TOKEN")):
-        pytest.skip("Copilot CLI contract requires GH_TOKEN or GITHUB_TOKEN")
-    if not is_copilot_cli_available():
-        pytest.skip("Copilot CLI binary is not on PATH")
+    _require_real_cli()
 
     profile = tmp_path / "profile"
     store = profile / ".copilot" / "session-store.db"
@@ -203,12 +198,23 @@ def test_a_headless_session_can_actually_invoke_an_mcp_tool(tmp_path):
 
 
 def _require_real_cli() -> None:
+    """Skip unless this machine can genuinely exercise the CLI.
+
+    Deliberately does NOT demand GH_TOKEN/GITHUB_TOKEN. The owner authenticates
+    through `copilot login`, whose credential lives in the system store -- and
+    a shell started from a shortcut never has that variable, because the app
+    injects it into its own process. Demanding it skipped every run on a machine
+    that works, which turns a gate into decoration.
+    """
     if os.environ.get("RUN_COPILOT_CONTRACT") != "1":
         pytest.skip("set RUN_COPILOT_CONTRACT=1 to spend real Copilot quota")
-    if not (os.environ.get("GH_TOKEN") or os.environ.get("GITHUB_TOKEN")):
-        pytest.skip("Copilot CLI contract requires GH_TOKEN or GITHUB_TOKEN")
     if not is_copilot_cli_available():
         pytest.skip("Copilot CLI binary is not on PATH")
+
+    from openjarvis.conductor.runner import _cli_authenticates
+
+    if not _cli_authenticates():
+        pytest.skip("the Copilot CLI cannot authenticate here (run `copilot login`)")
 
 
 def _fresh_store(profile):

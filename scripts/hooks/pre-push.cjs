@@ -35,12 +35,17 @@ const changed = spawnSync("git", ["diff", "--name-only", "@{u}...HEAD"], {
 });
 const files = (changed.stdout || "").split("\n");
 const touchesLayer = files.some((f) =>
-  /src\/openjarvis\/(conductor|tools\/(copilot_ide|copilot_sessions|mcp_bridge_config)|agents\/copilot_cli|speech\/vox_engine)/.test(
+  /src\/openjarvis\/(conductor|tools\/(copilot_ide|copilot_sessions|mcp_bridge_config)|agents\/copilot_cli|speech\/vox_engine)|tests\/conductor\/test_contract\.py/.test(
     f
   )
 );
 
-if (!touchesLayer) {
+// JARVIS_CONTRACT=1 runs them regardless. Useful to check the current working
+// tree by hand -- the diff above only sees COMMITS, which is right for a
+// pre-push hook and useless while still editing.
+const forced = process.env.JARVIS_CONTRACT === "1";
+
+if (!touchesLayer && !forced) {
   console.log("pre-push: a camada do Jarvis nao mudou, contract tests dispensados.");
   process.exit(0);
 }
@@ -57,19 +62,40 @@ const result = spawnSync(
     "--tb=short",
     "-p",
     "no:cacheprovider",
+    // A skip is not a pass. pytest exits 0 when everything is skipped, so a
+    // gate that only reads the exit code reports "checked" having checked
+    // nothing -- measured here, on the first run of this very hook. This makes
+    // pytest itself refuse a run where nothing executed.
+    "-p",
+    "no:randomly",
+    "--strict-markers",
   ],
   {
     cwd: repo,
-    stdio: "inherit",
+    stdio: ["inherit", "pipe", "inherit"],
+    encoding: "utf8",
     env: { ...process.env, RUN_COPILOT_CONTRACT: "1", PYTHONIOENCODING: "utf-8" },
   }
 );
+
+const out = result.stdout || "";
+process.stdout.write(out);
 
 if (result.status !== 0) {
   console.error(
     "\npre-push: os contract tests falharam. O que quebrou so aparece contra o " +
       "CLI real, e o CI nao consegue ve-lo. Corrija antes de empurrar, ou use " +
       "--no-verify se souber exatamente por que."
+  );
+  process.exit(1);
+}
+
+if (/\bskipped\b/.test(out) && !/\d+ passed/.test(out)) {
+  console.error(
+    "\npre-push: os contract tests foram TODOS pulados -- nada foi verificado.\n" +
+      "  Um pulo nao e uma aprovacao: sem token com assinatura ou sem o CLI no\n" +
+      "  PATH, este portao nao tem como provar nada e nao vai fingir que provou.\n" +
+      "  Rode `copilot login`, ou empurre com --no-verify assumindo o risco."
   );
   process.exit(1);
 }
