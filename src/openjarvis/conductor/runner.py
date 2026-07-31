@@ -17,6 +17,7 @@ from typing import Optional, Sequence
 
 from openjarvis.conductor.models import RetryPolicy
 from openjarvis.conductor.policy import EligibilityPolicy, TierPolicy
+from openjarvis.conductor.promotion import PromotionPolicy
 from openjarvis.conductor.runtime_lock import FileRuntimeLock
 from openjarvis.conductor.service import ConductorService, TickReport
 from openjarvis.conductor.state import SqliteClaimStore
@@ -93,6 +94,9 @@ def build_service(
             allowed_roots=tuple(allowed_roots),
         ),
         tiers=TierPolicy(),
+        # A session that stalled asking gets the owner's own autonomy panel
+        # turned on instead of having its questions answered one by one.
+        promotion=PromotionPolicy(),
         approvals=ApprovalStoreGate(),
         notifier=notifier,
         observation_recorder=None if dry_run else NativeJavaObservationRecorder(),

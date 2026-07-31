@@ -485,3 +485,111 @@ def test_default_prompt_is_a_single_line():
     rendered = DEFAULT_PROMPT.format(next_steps=NO_CHECKPOINT_HINT)
 
     assert "\n" not in rendered
+
+
+# ---------------------------------------------------------------------------
+# P5 -- promotion: a session that stalled on questions gets its own autonomy.
+# ---------------------------------------------------------------------------
+
+
+def _asking_detail(snapshot):
+    """A session that stopped asking rather than working."""
+    from openjarvis.conductor.service import SessionDetail, SessionTurn
+
+    turns = tuple(
+        SessionTurn(
+            turn_index=i,
+            timestamp="2026-07-30T20:00:00Z",
+            user_message="segue",
+            assistant_response=q,
+        )
+        for i, q in enumerate(
+            [
+                "Posso prosseguir com a fase 2?",
+                "Confirma que devo usar o backend antigo?",
+            ]
+        )
+    )
+    return SessionDetail(
+        snapshot=snapshot,
+        last_turn=turns[-1],
+        recent_turns=turns,
+        next_steps="",
+    )
+
+
+def test_stuck_asking_session_is_promoted_instead_of_answered(
+    claims, tmp_path, monkeypatch
+):
+    """Answering its questions one by one is the chore the owner wants gone."""
+    from openjarvis.conductor.promotion import PROMOTION_PROMPT, PromotionPolicy
+
+    monkeypatch.setenv("COPILOT_MODO_AUTO_DIR", str(tmp_path))
+    snap = _snapshot(turns=1)
+    reader = FakeReader([snap], {snap.session_id: _asking_detail(snap)})
+
+    class PromotingExecutor(FakeExecutor):
+        def resume(self, session_id, prompt, *, cwd="", turns=0):
+            self.calls.append((session_id, prompt))
+            # The session really enables it, so the plugin writes its state.
+            (tmp_path / f"{session_id}.json").write_text('{"on": true, "ts": 1}')
+            return ResumeResult(ok=True, content="modo_auto ligado")
+
+    executor = PromotingExecutor(reader)
+    report = _service(reader, claims, executor, promotion=PromotionPolicy()).tick()
+
+    assert [o.action for o in report.answered] == ["promoted"]
+    assert executor.calls[0][1] == PROMOTION_PROMPT
+
+
+def test_unconfirmed_promotion_is_not_reported_as_done(claims, tmp_path, monkeypatch):
+    """An agent can answer 'done' without having called the tool.
+
+    Confirmation reads the plugin's persisted state, so a promotion that only
+    happened in the reply stays pending and is retried.
+    """
+    from openjarvis.conductor.promotion import PromotionPolicy
+
+    monkeypatch.setenv("COPILOT_MODO_AUTO_DIR", str(tmp_path))
+    snap = _snapshot(turns=1)
+    reader = FakeReader([snap], {snap.session_id: _asking_detail(snap)})
+
+    class LyingExecutor(FakeExecutor):
+        def resume(self, session_id, prompt, *, cwd="", turns=0):
+            self.calls.append((session_id, prompt))
+            return ResumeResult(ok=True, content="Pronto, modo_auto ligado!")
+
+    report = _service(
+        reader, claims, LyingExecutor(reader), promotion=PromotionPolicy()
+    ).tick()
+
+    assert report.answered == []
+    assert report.pending[0].detail == "promotion unconfirmed"
+
+
+def test_already_autonomous_session_is_answered_normally(claims, tmp_path, monkeypatch):
+    from openjarvis.conductor.promotion import PromotionPolicy
+
+    monkeypatch.setenv("COPILOT_MODO_AUTO_DIR", str(tmp_path))
+    snap = _snapshot(turns=1)
+    (tmp_path / f"{snap.session_id}.json").write_text('{"on": true, "ts": 1}')
+    reader = FakeReader([snap], {snap.session_id: _asking_detail(snap)})
+    executor = FakeExecutor(reader)
+
+    report = _service(reader, claims, executor, promotion=PromotionPolicy()).tick()
+
+    assert [o.action for o in report.answered] == ["answered"]
+
+
+def test_working_session_is_never_promoted(claims, tmp_path, monkeypatch):
+    """Only a session stuck ASKING is taken over; one doing work is left alone."""
+    from openjarvis.conductor.promotion import PromotionPolicy
+
+    monkeypatch.setenv("COPILOT_MODO_AUTO_DIR", str(tmp_path))
+    snap = _snapshot(turns=1)
+    reader = FakeReader([snap], {snap.session_id: _detail(snap)})
+    executor = FakeExecutor(reader)
+
+    report = _service(reader, claims, executor, promotion=PromotionPolicy()).tick()
+
+    assert [o.action for o in report.answered] == ["answered"]

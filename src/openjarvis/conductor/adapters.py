@@ -63,6 +63,15 @@ class CopilotSessionsReader:
                 if last
                 else None
             ),
+            recent_turns=tuple(
+                SessionTurn(
+                    turn_index=int(t.get("turn_index", 0)),
+                    timestamp=str(t.get("timestamp", "")),
+                    user_message=str(t.get("user_message", "")),
+                    assistant_response=str(t.get("assistant_response", "")),
+                )
+                for t in turns
+            ),
             next_steps=str(checkpoint.get("next_steps", "")),
             work_done=str(checkpoint.get("work_done", "")),
             title=str(checkpoint.get("title", "")),

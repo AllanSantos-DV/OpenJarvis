@@ -34,6 +34,12 @@ from openjarvis.conductor.policy import (
     SessionSnapshot,
     TierPolicy,
 )
+from openjarvis.conductor.promotion import (
+    PROMOTION_PROMPT,
+    PromotionPolicy,
+    confirm_promotion,
+    is_autonomous,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -58,6 +64,9 @@ class SessionDetail:
 
     snapshot: SessionSnapshot
     last_turn: Optional[SessionTurn] = None
+    #: Tail of the conversation, oldest first. Used to tell a session that
+    #: stalled asking questions from one that simply finished its work.
+    recent_turns: tuple = ()
     next_steps: str = ""
     work_done: str = ""
     title: str = ""
@@ -205,6 +214,7 @@ class ConductorService:
         limit: int = 10,
         prompt_template: str = DEFAULT_PROMPT,
         auto_tiers: Sequence[str] = (TIER_TRIVIAL,),
+        promotion: Optional[PromotionPolicy] = None,
         readback_seconds: float = 120.0,
         readback_interval: float = 1.0,
     ) -> None:
@@ -220,6 +230,7 @@ class ConductorService:
         self._limit = limit
         self._prompt_template = prompt_template
         self._auto_tiers = tuple(auto_tiers)
+        self._promotion = promotion
         self._readback_seconds = readback_seconds
         self._readback_interval = readback_interval
 
@@ -339,6 +350,9 @@ class ConductorService:
             )
             return
 
+        if self._promote_if_stuck(claim, snapshot, detail, report):
+            return
+
         prompt = self._prompt_template.format(
             next_steps=(
                 f"Ultimo checkpoint registrado: {detail.next_steps}"
@@ -450,6 +464,61 @@ class ConductorService:
             if time.monotonic() >= deadline:
                 return None
             time.sleep(self._readback_interval)
+
+    def _promote_if_stuck(self, claim, snapshot, detail, report) -> bool:
+        """Hand the session its own autonomy when it stalled on questions.
+
+        A session that keeps asking is not waiting on work, it is waiting on a
+        human who is not coming. Answering its questions one by one is exactly
+        the chore the owner wants to stop doing, so the conductor turns on the
+        panel that answers them instead.
+
+        The switch lives in the target session's process, so it is asked to flip
+        it; confirmation then reads the plugin's persisted state rather than the
+        reply, because an agent can say "done" without having done it.
+        """
+        if self._promotion is None:
+            return False
+
+        turns = [t.assistant_response for t in (detail.recent_turns or [])]
+        verdict = self._promotion.evaluate(
+            snapshot.session_id, turns, autonomous=is_autonomous(snapshot.session_id)
+        )
+        if not verdict.should_promote:
+            return False
+
+        result = self._executor.resume(
+            snapshot.session_id,
+            PROMOTION_PROMPT,
+            cwd=snapshot.cwd,
+            turns=snapshot.turns,
+        )
+        if not result.ok:
+            self._claims.mark_failed(claim.key, claim.claim_token, error=result.error)
+            report.failed.append(
+                TickOutcome(snapshot.session_id, "failed", result.error)
+            )
+            return True
+
+        if not confirm_promotion(snapshot.session_id):
+            # The session did not actually enable it. Release rather than fail:
+            # nothing was accomplished, and the next tick should try again.
+            self._claims.release(
+                claim.key, claim.claim_token, reason="promotion not confirmed"
+            )
+            report.pending.append(
+                TickOutcome(snapshot.session_id, "pending", "promotion unconfirmed")
+            )
+            return True
+
+        self._claims.mark_succeeded(
+            claim.key, claim.claim_token, detail="promoted to autonomy"
+        )
+        report.answered.append(
+            TickOutcome(snapshot.session_id, "promoted", verdict.reason)
+        )
+        self._announce(snapshot, result)
+        return True
 
     def _finish_conflict(
         self,
