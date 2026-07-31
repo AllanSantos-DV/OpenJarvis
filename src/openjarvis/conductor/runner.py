@@ -43,38 +43,6 @@ def check_credentials(env: Optional[dict] = None) -> None:
         )
 
 
-def check_unattended(
-    *, interval: float, max_ticks: Optional[int], dry_run: bool
-) -> None:
-    """Refuse the one mode that needs containment we do not have yet.
-
-    A resumed session runs with the tools its owner granted it and the ambient
-    token -- that is deliberate, since a disarmed session cannot continue any
-    work. The safeguards are all *selection*: which sessions are eligible, which
-    tier may answer unattended, and one claim per turn. Selection is enough while
-    a human is at the keyboard, because the blast radius is one click.
-
-    An endless answering loop is a different thing. It is the mode whose only
-    real safeguard would be *containment* -- an unprivileged user, a container,
-    a scoped credential -- and none of that exists yet. So it is closed, rather
-    than reachable by a flag that reads as innocent as ``--interval 300``.
-
-    What stays open: a single tick per click (the default), continuous
-    observation (``--dry-run``), and a loop whose length is declared up front
-    (``--max-ticks``). Declaring it makes the choice visible on the command line
-    instead of implied.
-    """
-    if interval <= 0 or dry_run or max_ticks is not None:
-        return
-    raise StartupError(
-        "An unbounded loop that answers sessions is not available yet: it would "
-        "run unattended with the sessions' own tools and the ambient token, and "
-        "the containment for that (unprivileged user / container / scoped "
-        "credential) does not exist. Use --interval 0 for one tick per launch, "
-        "--dry-run to watch continuously, or --max-ticks N to declare how long "
-        "the loop should run."
-    )
-
 
 def build_service(
     *,
@@ -196,11 +164,6 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
     try:
         check_credentials()
-        check_unattended(
-            interval=args.interval,
-            max_ticks=args.max_ticks,
-            dry_run=args.dry_run,
-        )
         service = build_service(
             own_session_id=args.own_session_id,
             idle_minutes=args.idle_minutes,
