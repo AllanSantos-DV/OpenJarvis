@@ -81,7 +81,7 @@ $settings = New-ScheduledTaskSettingsSet `
 
 $action = New-ScheduledTaskAction `
     -Execute 'powershell.exe' `
-    -Argument "-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$launcher`"" `
+    -Argument "-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$launcher`" -Watch" `
     -WorkingDirectory $repoRoot
 
 Register-ScheduledTask `

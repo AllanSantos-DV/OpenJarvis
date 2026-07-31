@@ -22,12 +22,19 @@
 .EXAMPLE
     .\jarvis.ps1 -Stop
     Fecha a janela e o servidor.
+
+.EXAMPLE
+    .\jarvis.ps1 -Watch
+    Sobe e FICA vigiando: se o servidor cair, religa. Sem isto, um backend que
+    morre depois do boot deixa a janela viva e inutil -- ela nao sabe que ficou
+    sozinha.
 #>
 [CmdletBinding()]
 param(
     [switch]$InstallShortcut,
     [switch]$Stop,
-    [switch]$NoWindow
+    [switch]$NoWindow,
+    [switch]$Watch
 )
 
 $ErrorActionPreference = 'Stop'
@@ -93,7 +100,7 @@ if ($InstallShortcut) {
     # -WindowStyle Hidden: the launcher has nothing to show. The Jarvis window is
     # the product; a console sitting behind it is noise.
     $shortcut.Arguments =
-        "-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$PSCommandPath`""
+        "-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$PSCommandPath`" -Watch"
     $shortcut.WorkingDirectory = $repoRoot
     $shortcut.Description = 'Abre o Jarvis'
     if (Test-Path $app) { $shortcut.IconLocation = $app }
@@ -126,6 +133,17 @@ if (-not (Test-Path $python)) {
     Fail "venv nao encontrado em $python. Crie com: uv venv --python 3.12"
 }
 
+function Start-Server {
+    Push-Location $repoRoot
+    try {
+        & $python -m openjarvis.cli start
+        if ($LASTEXITCODE -ne 0) { return $false }
+    } finally {
+        Pop-Location
+    }
+    return (Wait-Server)
+}
+
 # --- o servidor -------------------------------------------------------------
 if (Test-Server) {
     Write-Host 'jarvis: servidor ja estava de pe.' -ForegroundColor DarkGray
@@ -136,17 +154,8 @@ if (Test-Server) {
     Write-Host ''
     Write-Host '  Jarvis subindo...' -ForegroundColor Cyan
     Write-Host '  (o servidor leva alguns segundos; a janela abre sozinha)' -ForegroundColor DarkGray
-    Push-Location $repoRoot
-    try {
-        & $python -m openjarvis.cli start
-        if ($LASTEXITCODE -ne 0) {
-            Fail 'o servidor nao subiu (a saida acima diz por que).'
-        }
-    } finally {
-        Pop-Location
-    }
-    if (-not (Wait-Server)) {
-        Fail "o servidor subiu mas nao respondeu em $url. Veja o log."
+    if (-not (Start-Server)) {
+        Fail "o servidor nao subiu ou nao respondeu em $url. Veja o log."
     }
     Write-Host '  servidor pronto.' -ForegroundColor Green
 }
@@ -170,4 +179,45 @@ if ($running) {
 } else {
     Start-Process $app -WorkingDirectory $repoRoot
     Write-Host 'jarvis: janela aberta.' -ForegroundColor Green
+}
+
+# --- vigia ------------------------------------------------------------------
+if (-not $Watch) { exit 0 }
+
+# A backend that dies AFTER boot leaves the window alive and useless -- it has
+# no way to know it is alone, so the owner gets a pretty, dead interface and no
+# explanation. Watching costs one socket probe every few seconds.
+#
+# It follows the window: when the owner closes Jarvis, the watch ends with it.
+# A supervisor that outlives the thing it supervises is a process to hunt down
+# later.
+Write-Host ''
+Write-Host '  vigiando o servidor (Ctrl+C encerra o vigia, nao o Jarvis).' -ForegroundColor DarkGray
+
+$failures = 0
+while ($true) {
+    Start-Sleep -Seconds 5
+
+    if (-not (Get-Process -Name 'openjarvis-desktop' -ErrorAction SilentlyContinue)) {
+        Write-Host '  janela fechada -- encerrando o vigia.' -ForegroundColor DarkGray
+        exit 0
+    }
+
+    if (Test-Server) { $failures = 0; continue }
+
+    # Two strikes: a single miss can be a restart in flight or a busy moment,
+    # and restarting a server that is merely slow makes things worse.
+    $failures++
+    if ($failures -lt 2) { continue }
+
+    Write-Host ''
+    Write-Host '  servidor caiu -- religando...' -ForegroundColor Yellow
+    if (Start-Server) {
+        Write-Host '  servidor de volta.' -ForegroundColor Green
+        $failures = 0
+    } else {
+        Write-Host '  nao consegui religar. Veja o log:' -ForegroundColor Red
+        Write-Host "    $env:USERPROFILE\.openjarvis\server.log" -ForegroundColor DarkGray
+        exit 2
+    }
 }
