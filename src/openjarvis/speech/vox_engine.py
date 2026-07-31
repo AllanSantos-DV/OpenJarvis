@@ -44,6 +44,55 @@ _VENDOR_DIR = Path(__file__).resolve().parent / "_vendor"
 _SAMPLE_RATE = 24000
 
 
+#: sha256 of each vendored SDK file, over LF-normalised bytes (Git rewrites line
+#: endings on checkout, and CRLF/LF is not drift). Checked at import, not only
+#: under pytest: a suite that catches this on someone's laptop does nothing for
+#: a process that boots from a modified copy and speaks to the owner's
+#: microphone. Regenerate deliberately when refreshing the SDK, and read the
+#: diff first -- nobody edits a vendored file on purpose.
+_VENDOR_SHA256 = {
+    "vox_sdk.py": "d0249e8c0b6809901c91b58379436e86dc89319c551c3102df804143095349ad",
+    "vox_lifecycle.py": (
+        "12e618b92a759118548717c43d6f1ed737f6bd238f5d7f917f84fd76f943860c"
+    ),
+    "_ed25519_ref.py": (
+        "f527e89be8a4c9c95aad4b096f762afb39c64e9a645156946d7b2e2c11187bda"
+    ),
+}
+
+
+class VendoredSdkTampered(RuntimeError):
+    """The vendored SDK on disk is not the copy that was reviewed."""
+
+
+def _verify_vendored(path: Path) -> None:
+    """Refuse to load a vendored file that does not match its recorded hash.
+
+    Loud on purpose. This code talks to a daemon that holds a microphone; a
+    modified copy is either an accident nobody noticed or something worse, and
+    both deserve to stop the process rather than a line in a log. An unknown
+    file (not in the table) is also refused -- an unreviewed file is exactly
+    what this is meant to catch.
+    """
+    import hashlib
+
+    expected = _VENDOR_SHA256.get(path.name)
+    if expected is None:
+        raise VendoredSdkTampered(
+            f"{path.name} nao esta na lista de arquivos vendorizados conhecidos."
+        )
+    actual = hashlib.sha256(path.read_bytes().replace(b"\r\n", b"\n")).hexdigest()
+    if actual != expected:
+        raise VendoredSdkTampered(
+            f"{path.name} difere da copia revisada.\n"
+            f"  esperado: {expected}\n"
+            f"  no disco: {actual}\n"
+            "Ninguem edita um arquivo vendorizado de proposito: ou algo foi "
+            "alterado por acidente, ou o SDK foi atualizado. Se foi atualizacao, "
+            "leia o diff e atualize _VENDOR_SHA256 no mesmo commit."
+        )
+
+
 def _load_sdk() -> Optional[Any]:
     """Return the vox-SDK lifecycle module, or ``None`` when unavailable.
 
@@ -67,6 +116,7 @@ def _load_sdk() -> Optional[Any]:
         if not path.exists():
             logger.debug("vendored vox-SDK missing: %s", path)
             return None
+        _verify_vendored(path)
         spec = importlib.util.spec_from_file_location(name, path)
         if spec is None or spec.loader is None:
             return None

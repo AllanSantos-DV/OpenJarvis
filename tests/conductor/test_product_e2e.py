@@ -95,6 +95,45 @@ def test_jarvis_delegates_a_build_and_follows_it(tmp_path):
 
 
 @pytest.mark.contract
+def test_jarvis_decides_and_delegates_a_real_build(tmp_path):
+    """The owner's sentence, whole, through the brain -- not around it.
+
+    The earlier E2E called the arms directly, which proves the arms and skips
+    the part that makes it a product: Jarvis DECIDING this is work rather than
+    conversation. That decision is the difference between an assistant and a
+    tool with a nice name.
+    """
+    _require_real_cli()
+
+    from openjarvis.conductor.brain import JarvisBrain
+
+    workspace = tmp_path / "projeto"
+    workspace.mkdir()
+    brain = JarvisBrain(workspace=str(workspace))
+
+    # A question is answered. No session, no files.
+    chat = brain.handle("Em uma linha: o que e um arquivo de log?")
+    assert chat.kind == "conversa", chat.answer
+    assert chat.session_id == ""
+    assert not any(workspace.iterdir()), "uma conversa nao deveria criar nada"
+
+    # Work is handed to a session, which does it.
+    build = brain.handle(
+        "Crie um arquivo notas.txt com exatamente uma linha: decidido pelo Jarvis."
+    )
+    assert build.delegated, f"o Jarvis tratou como conversa: {build.answer}"
+    assert build.session_id, build.answer
+
+    created = workspace / "notas.txt"
+    assert created.exists(), f"a sessao respondeu mas nada foi criado: {build.answer}"
+    assert "decidido pelo Jarvis" in created.read_text(encoding="utf-8")
+
+    # And he can report on it from the session's own record.
+    report = brain.follow(build.session_id)
+    assert build.session_id in report
+
+
+@pytest.mark.contract
 def test_a_second_instruction_does_not_open_a_second_session(tmp_path):
     """The silent failure that cost a day, guarded at the product level.
 

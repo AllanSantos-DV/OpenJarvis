@@ -2,61 +2,69 @@
 
 The SDK is copied into ``_vendor/`` rather than imported from the extension
 directory, so the backend keeps working when the owner moves or updates that
-extension. A copy has one failure mode: it drifts, silently. Nobody edits a
-vendored file on purpose, so a difference means either an accidental edit or a
-copy that was refreshed without anyone looking at what changed.
+extension. A copy has one failure mode: it drifts, silently.
 
-Line endings are normalised before hashing: Git rewrites them on checkout, and a
-CRLF/LF difference is not drift.
+The hashes live in ``vox_engine._VENDOR_SHA256`` and are enforced **at import**,
+not only here -- a suite that catches this on someone's laptop does nothing for a
+process that boots from a modified copy. These tests check the table is honest
+and that the enforcement actually refuses.
 """
 
 from __future__ import annotations
 
 import hashlib
-import pathlib
 
 import pytest
 
-VENDOR = (
-    pathlib.Path(__file__).resolve().parents[2]
-    / "src"
-    / "openjarvis"
-    / "speech"
-    / "_vendor"
+from openjarvis.speech.vox_engine import (
+    _VENDOR_DIR,
+    _VENDOR_SHA256,
+    VendoredSdkTampered,
+    _verify_vendored,
 )
 
-#: sha256 of each vendored file, over LF-normalised bytes.
-#: Regenerate deliberately when refreshing the SDK -- and read the diff first.
-EXPECTED = {
-    "_ed25519_ref.py": (
-        "f527e89be8a4c9c95aad4b096f762afb39c64e9a645156946d7b2e2c11187bda"
-    ),
-    "vox_lifecycle.py": (
-        "12e618b92a759118548717c43d6f1ed737f6bd238f5d7f917f84fd76f943860c"
-    ),
-    "vox_sdk.py": "d0249e8c0b6809901c91b58379436e86dc89319c551c3102df804143095349ad",
-}
 
-
-def _digest(path: pathlib.Path) -> str:
+def _digest(path) -> str:
     return hashlib.sha256(path.read_bytes().replace(b"\r\n", b"\n")).hexdigest()
 
 
-@pytest.mark.parametrize("name", sorted(EXPECTED))
-def test_vendored_file_has_not_drifted(name):
-    path = VENDOR / name
+@pytest.mark.parametrize("name", sorted(_VENDOR_SHA256))
+def test_vendored_file_matches_its_recorded_hash(name):
+    path = _VENDOR_DIR / name
     assert path.exists(), f"{name} disappeared from _vendor/"
-    assert _digest(path) == EXPECTED[name], (
-        f"{name} differs from the vendored copy that was reviewed.\n"
-        "Nobody edits a vendored file on purpose: either something was changed "
-        "by accident, or the SDK was refreshed. If it was a refresh, read the "
-        "diff and update EXPECTED in the same commit."
-    )
+    assert _digest(path) == _VENDOR_SHA256[name]
 
 
 def test_no_vendored_file_is_unaccounted_for():
     """A new file appearing here is drift too -- in the other direction."""
-    present = {p.name for p in VENDOR.glob("*.py")} - {"__init__.py"}
-    assert present == set(EXPECTED), (
-        f"vendored set changed: {present ^ set(EXPECTED)}"
+    present = {p.name for p in _VENDOR_DIR.glob("*.py")} - {"__init__.py"}
+    assert present == set(_VENDOR_SHA256), (
+        f"vendored set changed: {present ^ set(_VENDOR_SHA256)}"
     )
+
+
+def test_a_modified_file_is_refused_loudly(tmp_path):
+    """Loud on purpose: this code talks to a daemon holding a microphone."""
+    fake = tmp_path / "vox_sdk.py"
+    fake.write_text("# not the reviewed copy", encoding="utf-8")
+
+    with pytest.raises(VendoredSdkTampered, match="difere da copia revisada"):
+        _verify_vendored(fake)
+
+
+def test_an_unknown_file_is_refused_too(tmp_path):
+    """An unreviewed file is exactly what this exists to catch."""
+    fake = tmp_path / "vox_surpresa.py"
+    fake.write_text("# quem colocou isto aqui", encoding="utf-8")
+
+    with pytest.raises(VendoredSdkTampered, match="nao esta na lista"):
+        _verify_vendored(fake)
+
+
+def test_line_endings_are_not_drift(tmp_path):
+    """Git rewrites them on checkout; CRLF vs LF is not a modification."""
+    original = (_VENDOR_DIR / "vox_sdk.py").read_bytes()
+    crlf = tmp_path / "vox_sdk.py"
+    crlf.write_bytes(original.replace(b"\r\n", b"\n").replace(b"\n", b"\r\n"))
+
+    _verify_vendored(crlf)  # must not raise
