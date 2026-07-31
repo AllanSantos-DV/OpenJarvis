@@ -82,6 +82,40 @@ def test_split_answer_without_footer_returns_whole_output():
     assert footer == {}
 
 
+def test_the_disabled_tools_notice_is_not_part_of_the_answer():
+    """The CLI reports its own launch before answering; the user should not read it.
+
+    Measured in the owner's chat window: every reply arrived with a wrapped
+    "● Disabled tools: create, edit, glob, ..." block glued to the front. It is
+    a note about how the process was started, not the assistant speaking.
+    """
+    stdout = (
+        "● Disabled tools: create, edit, glob, grep, list_agents, powershell,\n"
+        "  read_agent, session_store_sql, skill, sql, view, web_fetch,\n"
+        "  write_agent\n"
+        "\n"
+        "Sou o Jarvis do Allan.\n" + FOOTER
+    )
+
+    answer, footer = _split_answer(stdout)
+
+    assert answer == "Sou o Jarvis do Allan."
+    assert "Disabled tools" not in answer
+    assert footer  # the telemetry block is still parsed
+
+
+def test_an_indented_line_in_a_real_answer_survives():
+    """Only the notice is dropped -- indentation elsewhere is content.
+
+    Code blocks and lists are indented too; cutting every indented line would
+    quietly mangle real answers.
+    """
+    answer, _ = _split_answer("Faca assim:\n    codigo indentado\nPronto.\n" + FOOTER)
+
+    assert "codigo indentado" in answer
+    assert "Pronto." in answer
+
+
 def test_build_command_uses_absolute_binary(monkeypatch):
     """CreateProcess ignores PATHEXT, so a bare name breaks the npm shim."""
     monkeypatch.setattr(

@@ -69,6 +69,10 @@ _RESUME_RE = re.compile(r"--resume=([0-9a-fA-F-]{36})")
 #: telemetry chrome, not model output.
 _FOOTER_START = "Changes"
 
+#: Status the CLI prints BEFORE the answer, about its own launch rather than the
+#: conversation -- e.g. "● Disabled tools: create, edit, ...". Not model output.
+_CHROME_PREFIX = "● Disabled tools:"
+
 #: Footer labels used to recognise the telemetry block (see :func:`_split_answer`).
 _FOOTER_LABELS = ("Changes", "AI Credits", "Tokens", "Resume", "Total duration")
 
@@ -112,9 +116,9 @@ def _split_answer(stdout: str) -> tuple[str, dict[str, str]]:
             break
 
     if cut == -1:
-        return stdout.strip(), {}
+        return _strip_chrome(stdout), {}
 
-    answer = "\n".join(lines[:cut]).strip()
+    answer = _strip_chrome("\n".join(lines[:cut]))
 
     footer: dict[str, str] = {}
     for line in lines[cut:]:
@@ -124,6 +128,32 @@ def _split_answer(stdout: str) -> tuple[str, dict[str, str]]:
                 break
 
     return answer, footer
+
+
+def _strip_chrome(text: str) -> str:
+    """Drop the CLI's own status lines from what the user reads.
+
+    Before the answer the CLI reports what it disabled -- a wrapped list of tool
+    names beginning with ``● Disabled tools:``. That is a note about the launch,
+    not part of the reply, and it reached the owner's chat window verbatim.
+
+    The continuation lines carry no marker of their own, so the block is cut
+    from the bullet until the first line that is not an indented continuation.
+    """
+    lines = text.splitlines()
+    kept: list[str] = []
+    skipping = False
+    for line in lines:
+        if line.lstrip().startswith(_CHROME_PREFIX):
+            skipping = True
+            continue
+        if skipping:
+            # A wrapped continuation is indented; anything else ends the block.
+            if line.startswith(("  ", "\t")) and line.strip():
+                continue
+            skipping = False
+        kept.append(line)
+    return "\n".join(kept).strip()
 
 
 def _read_text(path: str) -> str:
