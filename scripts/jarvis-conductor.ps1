@@ -37,6 +37,8 @@ param(
     [switch]$DryRun,
     [switch]$Quiet,
     [switch]$InstallShortcut,
+    # Opt-in: without it the conductor only reports, never answers on its own.
+    [switch]$AutoAnswer,
     [string]$LogLevel = 'INFO'
 )
 
@@ -107,6 +109,19 @@ $arguments = @(
     '--interval', $Interval,
     '--log-level', $LogLevel
 )
+# Safety defaults for the desktop shortcut, which carries no arguments:
+#   * without -AllowedRoot the conductor could answer sessions in ANY folder;
+#   * without -AutoAnswer every idle session gets answered unattended.
+# Both are opt-in, so a plain double-click observes and reports instead.
+if (-not $AllowedRoot -or $AllowedRoot.Count -eq 0) {
+    $AllowedRoot = @(Split-Path -Parent $repoRoot)
+    Write-Host "jarvis-conductor: escopo limitado a $($AllowedRoot[0]) (use -AllowedRoot para ampliar)." -ForegroundColor Yellow
+}
+if (-not $AutoAnswer -and -not $DryRun) {
+    Write-Host "jarvis-conductor: modo relatorio (use -AutoAnswer para deixar responder)." -ForegroundColor Yellow
+    $DryRun = $true
+}
+
 foreach ($root in $AllowedRoot) { $arguments += @('--allowed-root', $root) }
 if ($DryRun) { $arguments += '--dry-run' }
 if ($Quiet) { $arguments += '--quiet' }

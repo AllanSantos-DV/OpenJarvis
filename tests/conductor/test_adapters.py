@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 
 from openjarvis.conductor.adapters import ApprovalStoreGate, CopilotCliResumeExecutor
 
@@ -13,11 +14,18 @@ class _Rule:
 
 
 class _Action:
-    def __init__(self, action_type, payload, status, id_="a1") -> None:
+    def __init__(self, action_type, payload, status, id_="a1", expires_at=None) -> None:
         self.action_type = action_type
         self.payload = payload
         self.status = status
         self.id = id_
+        # Real actions always carry a deadline; the gate treats a missing one
+        # as expired, so a test expecting an approval to count must set it.
+        self.expires_at = (
+            expires_at
+            if expires_at is not None
+            else (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat()
+        )
 
 
 class FakeApprovalStore:
@@ -144,4 +152,55 @@ def test_approval_gate_honours_permission_memory():
         payload={"session_id": "s1", "fingerprint": "fp1"},
         permission_key="copilot_resume:repo",
         tier="low",
+    )
+
+
+def test_expired_approval_does_not_authorise():
+    """A decision has a shelf life. `list_approved` does not filter by deadline,
+    so an approval the owner gave days ago would otherwise still open the door."""
+    store = FakeApprovalStore()
+    store.approved.append(
+        _Action(
+            "copilot_resume",
+            {"session_id": "s1", "fingerprint": "fp1"},
+            "approved",
+            expires_at=(datetime.now(timezone.utc) - timedelta(hours=1)).isoformat(),
+        )
+    )
+    gate = ApprovalStoreGate(store=store)
+
+    allowed = gate.request(
+        action_type="copilot_resume",
+        description="Retomar sessao",
+        payload={"session_id": "s1", "fingerprint": "fp1"},
+        permission_key="copilot_resume:repo",
+        tier="high",
+    )
+
+    assert allowed is False
+    assert store.status_updates == []
+
+
+def test_approval_without_a_deadline_is_treated_as_expired():
+    """Fail closed: a decision whose validity cannot be established authorises
+    nothing."""
+    store = FakeApprovalStore()
+    store.approved.append(
+        _Action(
+            "copilot_resume",
+            {"session_id": "s1", "fingerprint": "fp1"},
+            "approved",
+            expires_at="",
+        )
+    )
+
+    assert (
+        ApprovalStoreGate(store=store).request(
+            action_type="copilot_resume",
+            description="Retomar sessao",
+            payload={"session_id": "s1", "fingerprint": "fp1"},
+            permission_key="copilot_resume:repo",
+            tier="high",
+        )
+        is False
     )

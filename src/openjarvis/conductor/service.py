@@ -173,7 +173,7 @@ class TickReport:
 
 #: The conductor asks for a bounded status report, not for unattended work.
 #:
-#: This is deliberate. The executor runs with no tools visible, so instructing
+#: This is deliberate. The session keeps its own tools, so instructing
 #: the session to "carry on and do the work" would ask for something it cannot
 #: perform, and the turn would burn its whole timeout achieving nothing. What
 #: the owner actually needs from a stalled session is the same thing he would

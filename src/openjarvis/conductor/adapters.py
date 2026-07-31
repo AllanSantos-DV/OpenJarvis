@@ -7,6 +7,7 @@ lives here, so :mod:`openjarvis.conductor.service` stays a pure decision loop.
 from __future__ import annotations
 
 import logging
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Sequence
 
 from openjarvis.conductor.policy import SessionSnapshot
@@ -174,6 +175,24 @@ class CopilotCliResumeExecutor:
         )
 
 
+def _has_expired(action: Any, now: datetime) -> bool:
+    """Whether an approval is past the deadline it was queued with.
+
+    Unparseable or missing deadlines count as expired: a decision whose validity
+    cannot be established must not authorise anything.
+    """
+    raw = getattr(action, "expires_at", "") or ""
+    if not raw:
+        return True
+    try:
+        deadline = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except ValueError:
+        return True
+    if deadline.tzinfo is None:
+        deadline = deadline.replace(tzinfo=timezone.utc)
+    return deadline <= now
+
+
 class ApprovalStoreGate:
     """Approval gate backed by the existing ``ApprovalStore``.
 
@@ -231,12 +250,17 @@ class ApprovalStoreGate:
                 return False
 
         # An earlier tick may already have queued this and had it approved.
+        # `list_approved` does not filter by expiry, so an approval the owner
+        # gave days ago would still authorise a fresh turn. A decision has a
+        # shelf life: honour the deadline it was queued with.
+        now = datetime.now(timezone.utc)
         for action in self._store.list_approved():
             if (
                 action.action_type == action_type
                 and action.payload.get("session_id") == payload.get("session_id")
                 and action.payload.get("fingerprint") == payload.get("fingerprint")
                 and action.status == STATUS_APPROVED
+                and not _has_expired(action, now)
             ):
                 self._store.update_status(action.id, STATUS_EXECUTED)
                 return True
