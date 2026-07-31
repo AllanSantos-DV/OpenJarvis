@@ -230,6 +230,14 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         ),
     )
     parser.add_argument("--log-level", default="INFO")
+    parser.add_argument(
+        "--no-canary",
+        action="store_true",
+        help=(
+            "skip the boot check of the environment (CLI, MCP servers). Only "
+            "useful when it is the check itself that is misbehaving."
+        ),
+    )
     args = parser.parse_args(argv)
 
     logging.basicConfig(
@@ -239,6 +247,16 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
     try:
         check_credentials(probe=True)
+
+        if not args.no_canary:
+            # Before touching a session: is the environment still what the last
+            # run relied on? The suite cannot see the CLI, the bridge or the
+            # store, and CI has none of them -- so the check happens here.
+            from openjarvis.conductor.canary import run_canary
+
+            canary = run_canary()
+            print(f"jarvis-conductor: {canary.summary()}")
+
         service = build_service(
             own_session_id=args.own_session_id,
             idle_minutes=args.idle_minutes,
