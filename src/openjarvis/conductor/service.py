@@ -1,0 +1,390 @@
+"""The conductor tick: the loop that actually orchestrates other sessions.
+
+This is the piece that turns registered adapters into a maestro. One tick:
+
+1. reclaims leases orphaned by a previous crash;
+2. lists sessions and drops everything the safety policy rejects;
+3. builds a fingerprint of the exact turn it intends to answer;
+4. claims that fingerprint, so no second conductor answers it too;
+5. asks the approval gate whether it may act, given the risk tier;
+6. re-reads the session and aborts if it moved while we were deciding;
+7. executes the reply, then verifies a new turn really landed;
+8. records success, failure or conflict, always releasing the lease.
+
+Every step goes through a port, so the whole loop runs against fakes in tests.
+Nothing here imports an agent, an engine or a model.
+"""
+
+from __future__ import annotations
+
+import logging
+import time
+from dataclasses import dataclass, field
+from typing import Any, Dict, List, Optional, Protocol, Sequence
+
+from openjarvis.conductor.models import (
+    Claim,
+    ObservationFingerprint,
+    StaleClaimError,
+    make_owner_id,
+)
+from openjarvis.conductor.policy import (
+    TIER_TRIVIAL,
+    EligibilityPolicy,
+    SessionSnapshot,
+    TierPolicy,
+)
+
+logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True, slots=True)
+class SessionTurn:
+    """The last turn of a session -- what we would be replying to."""
+
+    turn_index: int
+    timestamp: str
+    user_message: str = ""
+    assistant_response: str = ""
+
+    @property
+    def content(self) -> str:
+        return f"{self.user_message}\n{self.assistant_response}"
+
+
+@dataclass(frozen=True, slots=True)
+class SessionDetail:
+    """Everything the conductor needs to decide and to report."""
+
+    snapshot: SessionSnapshot
+    last_turn: Optional[SessionTurn] = None
+    next_steps: str = ""
+    work_done: str = ""
+    title: str = ""
+
+
+@dataclass(frozen=True, slots=True)
+class ResumeResult:
+    """Outcome of asking the target session to continue."""
+
+    ok: bool
+    content: str = ""
+    error: str = ""
+
+
+class SessionReader(Protocol):
+    """Read-only view over the Copilot app's sessions."""
+
+    def list_idle(self, idle_minutes: float, limit: int) -> List[SessionSnapshot]: ...
+
+    def detail(self, session_id: str) -> Optional[SessionDetail]: ...
+
+
+class ResumeExecutor(Protocol):
+    """Sends one new turn into an existing session."""
+
+    def resume(self, session_id: str, prompt: str) -> ResumeResult: ...
+
+
+class ApprovalGate(Protocol):
+    """Decides whether an action of a given tier may run now."""
+
+    def request(
+        self,
+        *,
+        action_type: str,
+        description: str,
+        payload: Dict[str, Any],
+        permission_key: str,
+        tier: str,
+    ) -> bool:
+        """``True`` to act now; ``False`` to leave it pending for a human."""
+
+
+class Notifier(Protocol):
+    """Tells the owner what happened, out of band."""
+
+    def notify(self, message: str) -> None: ...
+
+
+@dataclass(slots=True)
+class TickOutcome:
+    """What the conductor did to one session during a tick."""
+
+    session_id: str
+    action: str
+    detail: str = ""
+
+
+@dataclass(slots=True)
+class TickReport:
+    """Aggregate result of one tick, suitable for logs and for speaking aloud."""
+
+    recovered: int = 0
+    considered: int = 0
+    skipped: List[TickOutcome] = field(default_factory=list)
+    pending: List[TickOutcome] = field(default_factory=list)
+    answered: List[TickOutcome] = field(default_factory=list)
+    failed: List[TickOutcome] = field(default_factory=list)
+    conflicts: List[TickOutcome] = field(default_factory=list)
+
+    @property
+    def acted(self) -> int:
+        return len(self.answered)
+
+    def summary(self) -> str:
+        return (
+            f"considered={self.considered} answered={len(self.answered)} "
+            f"pending={len(self.pending)} failed={len(self.failed)} "
+            f"conflicts={len(self.conflicts)} skipped={len(self.skipped)} "
+            f"recovered={self.recovered}"
+        )
+
+
+#: The conductor asks for a bounded status report, not for unattended work.
+#:
+#: This is deliberate. The executor runs with no tools visible, so instructing
+#: the session to "carry on and do the work" would ask for something it cannot
+#: perform, and the turn would burn its whole timeout achieving nothing. What
+#: the owner actually needs from a stalled session is the same thing he would
+#: read himself: where it stopped, what it needs, and whether it can proceed.
+#: Handing real autonomy back is a separate, explicit step.
+DEFAULT_PROMPT = (
+    "O Jarvis esta verificando esta sessao em nome do dono, que nao esta olhando "
+    "agora.\n"
+    "NAO execute ferramentas e NAO altere arquivos: apenas relate.\n"
+    "Responda em ate 5 linhas: (1) onde o trabalho parou, (2) qual e a proxima "
+    "acao concreta, (3) se voce consegue seguir sozinho ou precisa de uma decisao "
+    "do dono -- e, nesse caso, qual e a pergunta objetiva.\n"
+    "Ultimo checkpoint registrado: {next_steps}"
+)
+
+
+class ConductorService:
+    """Composes the ports into the tick described in the module docstring."""
+
+    def __init__(
+        self,
+        *,
+        reader: SessionReader,
+        claims: Any,
+        executor: ResumeExecutor,
+        eligibility: Optional[EligibilityPolicy] = None,
+        tiers: Optional[TierPolicy] = None,
+        approvals: Optional[ApprovalGate] = None,
+        notifier: Optional[Notifier] = None,
+        owner: str = "",
+        limit: int = 10,
+        prompt_template: str = DEFAULT_PROMPT,
+        auto_tiers: Sequence[str] = (TIER_TRIVIAL,),
+        readback_seconds: float = 20.0,
+        readback_interval: float = 1.0,
+    ) -> None:
+        self._reader = reader
+        self._claims = claims
+        self._executor = executor
+        self._eligibility = eligibility or EligibilityPolicy()
+        self._tiers = tiers or TierPolicy()
+        self._approvals = approvals
+        self._notifier = notifier
+        self._owner = owner or make_owner_id()
+        self._limit = limit
+        self._prompt_template = prompt_template
+        self._auto_tiers = tuple(auto_tiers)
+        self._readback_seconds = readback_seconds
+        self._readback_interval = readback_interval
+
+    @property
+    def owner(self) -> str:
+        return self._owner
+
+    def tick(self) -> TickReport:
+        """Run one full pass. Never raises for a single bad session."""
+        report = TickReport()
+        report.recovered = len(self._claims.recover_expired())
+
+        candidates = self._reader.list_idle(self._eligibility.idle_minutes, self._limit)
+        for snapshot in candidates:
+            report.considered += 1
+            try:
+                self._handle(snapshot, report)
+            except Exception as exc:  # noqa: BLE001 - one bad session must not stop the tick
+                logger.exception("conductor tick failed for %s", snapshot.session_id)
+                report.failed.append(
+                    TickOutcome(snapshot.session_id, "error", str(exc))
+                )
+        logger.info("conductor tick: %s", report.summary())
+        return report
+
+    def _handle(self, snapshot: SessionSnapshot, report: TickReport) -> None:
+        verdict = self._eligibility.evaluate(snapshot)
+        if not verdict.eligible:
+            report.skipped.append(
+                TickOutcome(snapshot.session_id, "skipped", verdict.reason)
+            )
+            return
+
+        detail = self._reader.detail(snapshot.session_id)
+        if detail is None or detail.last_turn is None:
+            report.skipped.append(
+                TickOutcome(snapshot.session_id, "skipped", "no readable turn")
+            )
+            return
+
+        fingerprint = self._fingerprint(snapshot.session_id, detail.last_turn)
+        claim = self._claims.acquire(fingerprint, self._owner)
+        if claim is None:
+            report.skipped.append(
+                TickOutcome(
+                    snapshot.session_id, "skipped", "already handled or claimed"
+                )
+            )
+            return
+
+        tier = self._tiers.classify(snapshot, next_steps=detail.next_steps)
+        if not self._authorised(snapshot, detail, tier):
+            # Leave it for a human; release the lease so the next tick can pick
+            # it up once the decision arrives.
+            self._claims.mark_failed(
+                claim.key, claim.claim_token, error=f"awaiting approval ({tier})"
+            )
+            report.pending.append(TickOutcome(snapshot.session_id, "pending", tier))
+            return
+
+        self._execute(claim, snapshot, detail, tier, report)
+
+    def _authorised(
+        self, snapshot: SessionSnapshot, detail: SessionDetail, tier: str
+    ) -> bool:
+        if tier in self._auto_tiers:
+            return True
+        if self._approvals is None:
+            return False
+        return self._approvals.request(
+            action_type="copilot_resume",
+            description=(
+                f"Retomar a sessao '{snapshot.summary or snapshot.session_id}' "
+                f"parada ha {snapshot.idle_minutes:.0f} min"
+            ),
+            payload={
+                "session_id": snapshot.session_id,
+                "cwd": snapshot.cwd,
+                "next_steps": detail.next_steps,
+            },
+            permission_key=f"copilot_resume:{snapshot.repository or snapshot.cwd}",
+            tier=tier,
+        )
+
+    def _execute(
+        self,
+        claim: Claim,
+        snapshot: SessionSnapshot,
+        detail: SessionDetail,
+        tier: str,
+        report: TickReport,
+    ) -> None:
+        try:
+            self._claims.mark_running(claim.key, claim.claim_token)
+        except StaleClaimError as exc:
+            report.skipped.append(TickOutcome(snapshot.session_id, "skipped", str(exc)))
+            return
+
+        # Re-read right before acting: the owner may have typed into the session
+        # while we were classifying, and answering then would talk over them.
+        fresh = self._reader.detail(snapshot.session_id)
+        if fresh is None or fresh.last_turn is None:
+            self._finish_conflict(claim, snapshot, report, "session vanished")
+            return
+        if self._fingerprint(snapshot.session_id, fresh.last_turn) != claim.fingerprint:
+            self._finish_conflict(
+                claim, snapshot, report, "session moved before resume"
+            )
+            return
+
+        prompt = self._prompt_template.format(
+            next_steps=detail.next_steps or "(sem checkpoint registrado)"
+        )
+        result = self._executor.resume(snapshot.session_id, prompt)
+
+        if not result.ok:
+            self._claims.mark_failed(claim.key, claim.claim_token, error=result.error)
+            report.failed.append(
+                TickOutcome(snapshot.session_id, "failed", result.error)
+            )
+            return
+
+        # Verify the reply actually landed instead of trusting the exit code.
+        # The app persists the turn shortly AFTER the CLI process exits, so
+        # a single immediate read is a false failure; poll briefly instead.
+        landed = self._await_new_turn(
+            snapshot.session_id, claim.fingerprint.turn_index
+        )
+        if not landed:
+            self._claims.mark_failed(
+                claim.key, claim.claim_token, error="no new turn recorded"
+            )
+            report.failed.append(
+                TickOutcome(snapshot.session_id, "failed", "no new turn recorded")
+            )
+            return
+
+        self._claims.mark_succeeded(claim.key, claim.claim_token, detail=tier)
+        report.answered.append(TickOutcome(snapshot.session_id, "answered", tier))
+        self._announce(snapshot, result)
+
+    def _await_new_turn(self, session_id: str, previous_index: int) -> bool:
+        """Poll for the reply to appear, tolerating the store's write lag."""
+        deadline = time.monotonic() + self._readback_seconds
+        while True:
+            after = self._reader.detail(session_id)
+            if (
+                after is not None
+                and after.last_turn is not None
+                and after.last_turn.turn_index > previous_index
+            ):
+                return True
+            if time.monotonic() >= deadline:
+                return False
+            time.sleep(self._readback_interval)
+
+    def _finish_conflict(
+        self,
+        claim: Claim,
+        snapshot: SessionSnapshot,
+        report: TickReport,
+        reason: str,
+    ) -> None:
+        self._claims.mark_conflict(claim.key, claim.claim_token, detail=reason)
+        report.conflicts.append(TickOutcome(snapshot.session_id, "conflict", reason))
+
+    def _announce(self, snapshot: SessionSnapshot, result: ResumeResult) -> None:
+        if self._notifier is None:
+            return
+        try:
+            self._notifier.notify(
+                f"Retomei a sessao {snapshot.summary or snapshot.session_id}. "
+                f"{result.content[:200]}"
+            )
+        except Exception:  # noqa: BLE001 - notification must not fail the tick
+            logger.debug("conductor notification failed", exc_info=True)
+
+    @staticmethod
+    def _fingerprint(session_id: str, turn: SessionTurn) -> ObservationFingerprint:
+        return ObservationFingerprint.from_turn(
+            session_id, turn.turn_index, turn.timestamp, turn.content
+        )
+
+
+__all__ = [
+    "ApprovalGate",
+    "ConductorService",
+    "DEFAULT_PROMPT",
+    "Notifier",
+    "ResumeExecutor",
+    "ResumeResult",
+    "SessionDetail",
+    "SessionReader",
+    "SessionTurn",
+    "TickOutcome",
+    "TickReport",
+]

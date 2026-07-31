@@ -214,3 +214,31 @@ def test_spec_is_openai_compatible(store):
         "idle",
         "detail",
     }
+
+
+def test_list_exposes_host_type_for_the_security_filter(store):
+    """The conductor must be able to tell app sessions from CLI ones."""
+    import sqlite3
+
+    conn = sqlite3.connect(store)
+    conn.execute("UPDATE sessions SET host_type = 'github' WHERE id = 'stale'")
+    conn.commit()
+    conn.close()
+
+    sessions = _tool(store).execute(action="list").content["sessions"]
+    by_id = {s["session_id"]: s for s in sessions}
+
+    assert by_id["stale"]["host_type"] == "github"
+    assert by_id["fresh"]["host_type"] == ""
+
+
+def test_detail_exposes_host_type(store):
+    import sqlite3
+
+    conn = sqlite3.connect(store)
+    conn.execute("UPDATE sessions SET host_type = 'github' WHERE id = 'stale'")
+    conn.commit()
+    conn.close()
+
+    detail = _tool(store).execute(action="detail", session_id="stale").content
+    assert detail["host_type"] == "github"

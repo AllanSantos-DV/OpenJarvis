@@ -137,6 +137,7 @@ class CopilotCliAgent(BaseAgent):
         allow_tools: Optional[List[str]] = None,
         deny_tools: Optional[List[str]] = None,
         allow_all_tools: bool = False,
+        env: Optional[dict] = None,
     ) -> None:
         super().__init__(
             engine,
@@ -151,6 +152,7 @@ class CopilotCliAgent(BaseAgent):
         self._allowed_dirs = allowed_dirs or []
         self._no_ask_user = no_ask_user
         self._timeout = timeout
+        self._env = dict(env) if env else None
 
         self._allow_all_tools = allow_all_tools
         self._available_tools = (
@@ -224,9 +226,14 @@ class CopilotCliAgent(BaseAgent):
         if the timeout fires -- ``subprocess.run`` only ever kills the
         immediate child, orphaning any MCP/tool subprocesses it spawned.
         """
+        # A child inherits this machine's CLI plugins and their hooks, so the
+        # caller may need to hand it environment overrides (see the conductor).
+        child_env = {**os.environ, **self._env} if self._env else None
+
         proc = subprocess.Popen(
             cmd,
             cwd=self._workspace,
+            env=child_env,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,

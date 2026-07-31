@@ -168,7 +168,7 @@ class CopilotSessionsTool(BaseTool):
         while True:
             rows = conn.execute(
                 """
-                SELECT s.id, s.summary, s.cwd, s.repository, s.branch,
+                SELECT s.id, s.summary, s.cwd, s.repository, s.branch, s.host_type,
                        COUNT(t.id) AS turns, MAX(t.timestamp) AS last_activity
                 FROM sessions s
                 JOIN turns t ON t.session_id = s.id
@@ -195,6 +195,7 @@ class CopilotSessionsTool(BaseTool):
                         "cwd": row["cwd"] or "",
                         "repository": row["repository"] or "",
                         "branch": row["branch"] or "",
+                        "host_type": row["host_type"] or "",
                         "turns": row["turns"],
                         "last_activity": row["last_activity"] or "",
                         "idle_minutes": idle,
@@ -211,7 +212,7 @@ class CopilotSessionsTool(BaseTool):
 
     def _detail(self, conn: sqlite3.Connection, session_id: str) -> Dict[str, Any]:
         session = conn.execute(
-            "SELECT id, summary, cwd, repository, branch, created_at, updated_at "
+            "SELECT id, summary, cwd, repository, branch, host_type, created_at, updated_at "
             "FROM sessions WHERE id = ?",
             (session_id,),
         ).fetchone()
@@ -243,6 +244,7 @@ class CopilotSessionsTool(BaseTool):
             "cwd": session["cwd"] or "",
             "repository": session["repository"] or "",
             "branch": session["branch"] or "",
+            "host_type": session["host_type"] or "",
             "created_at": session["created_at"] or "",
             "updated_at": session["updated_at"] or "",
             "files_touched": [row["file_path"] for row in files],
