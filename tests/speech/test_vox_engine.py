@@ -7,6 +7,7 @@ import pytest
 from openjarvis.core.registry import SpeechRegistry, TTSRegistry
 from openjarvis.speech._stubs import TranscriptionResult
 from openjarvis.speech.vox_engine import (
+    _TRANSCRIBE_ARGS,
     VoxEngineSpeechBackend,
     VoxEngineTTSBackend,
 )
@@ -218,6 +219,42 @@ def test_transcribe_accepts_the_declared_signature():
 
 def test_supported_formats_is_answered_not_declared_empty():
     assert "wav" in VoxEngineSpeechBackend().supported_formats()
+
+
+def test_the_call_matches_the_real_sdk_signature():
+    """The fake accepts anything, so only the REAL signature can catch this.
+
+    ``_FakeClient.transcribe_file(**kwargs)`` swallows every argument, which is
+    why a mocked suite stayed green while the live call raised
+    ``unexpected keyword argument 'format'``. Checking against the vendored
+    SDK's actual signature costs nothing and catches the whole class: if the
+    SDK drops or renames an argument, this fails here instead of in the owner's
+    microphone.
+    """
+    import inspect
+
+    from openjarvis.speech._vendor.vox_sdk import VoxClient
+
+    real = set(inspect.signature(VoxClient.transcribe_file).parameters) - {
+        "self",
+        "audio",
+    }
+
+    assert _TRANSCRIBE_ARGS <= real, (
+        f"we forward arguments the SDK does not take: {_TRANSCRIBE_ARGS - real}"
+    )
+    # The two we always pass must exist, or every transcription breaks.
+    assert {"lang", "session"} <= real
+
+
+def test_the_tts_call_matches_the_real_sdk_signature():
+    import inspect
+
+    from openjarvis.speech._vendor.vox_sdk import VoxClient
+
+    real = set(inspect.signature(VoxClient.tts).parameters)
+
+    assert {"fmt", "voice", "speed", "session"} <= real
 
 
 def test_health_probe_never_installs(monkeypatch):
