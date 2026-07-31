@@ -30,6 +30,7 @@ from typing import Any, List, Optional
 from openjarvis.agents._stubs import AgentContext, AgentResult, BaseAgent
 from openjarvis.core.events import EventBus
 from openjarvis.core.registry import AgentRegistry
+from openjarvis.core.types import Role
 from openjarvis.core.utils import kill_process_tree
 from openjarvis.engine._stubs import InferenceEngine
 
@@ -125,6 +126,16 @@ def _split_answer(stdout: str) -> tuple[str, dict[str, str]]:
     return answer, footer
 
 
+def _read_text(path: str) -> str:
+    """Read a persona file, tolerating a path that no longer exists."""
+    try:
+        with open(path, encoding="utf-8") as fh:
+            return fh.read().strip()
+    except OSError:
+        logger.debug("persona file not readable: %s", path)
+        return ""
+
+
 @AgentRegistry.register("copilot_cli")
 class CopilotCliAgent(BaseAgent):
     """Agent that delegates every turn to the GitHub Copilot CLI.
@@ -185,6 +196,7 @@ class CopilotCliAgent(BaseAgent):
 
         self._allow_all_tools = allow_all_tools
         self._sandboxed = sandboxed
+        self._persona_cache: Any = None
         self._available_tools = (
             list(available_tools) if available_tools is not None else []
         )
@@ -210,16 +222,22 @@ class CopilotCliAgent(BaseAgent):
         """CLI session id of the ongoing conversation ("" before the first run)."""
         return self._session_id
 
-    def _build_command(self, prompt: str) -> List[str]:
+    def _build_command(self) -> List[str]:
         """Assemble the ``copilot`` argv for one turn.
+
+        The prompt is NOT here: it goes on stdin. Windows caps a command line at
+        ~8191 characters, and a prompt carrying SOUL.md plus recalled memory plus
+        the conversation blows past that -- the CLI then never starts at all
+        ("Linha de comando muito longa"), which reads like a Copilot failure
+        rather than a limit we hit. Measured: the CLI reads a piped prompt.
 
         Secure by default: unless ``allow_all_tools=True`` was explicitly
         requested, the CLI is launched with the dangerous built-ins denied by
         name and MCP servers disabled, rather than the blanket ``--allow-all-tools``.
-        No permission is ever inferred from ``prompt`` -- only from the
-        agent's own constructor-time configuration.
+        No permission is ever inferred from the prompt -- only from the agent's
+        own constructor-time configuration.
         """
-        cmd = [_resolve_binary() or "copilot", "-p", prompt]
+        cmd = [_resolve_binary() or "copilot"]
 
         if self._allow_all_tools:
             cmd.append("--allow-all-tools")
@@ -265,8 +283,8 @@ class CopilotCliAgent(BaseAgent):
 
         return cmd
 
-    def _spawn(self, cmd: List[str]) -> "subprocess.CompletedProcess[str]":
-        """Run ``cmd`` to completion, enforcing ``self._timeout``.
+    def _spawn(self, cmd: List[str], prompt: str) -> "subprocess.CompletedProcess[str]":
+        """Run ``cmd`` to completion with ``prompt`` on stdin, enforcing the timeout.
 
         Uses :func:`subprocess.Popen` (not :func:`subprocess.run`) so the
         spawned pid is available for :func:`~openjarvis.core.utils.kill_process_tree`
@@ -281,6 +299,7 @@ class CopilotCliAgent(BaseAgent):
             cmd,
             cwd=self._workspace,
             env=child_env,
+            stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
@@ -288,11 +307,77 @@ class CopilotCliAgent(BaseAgent):
             errors="replace",
         )
         try:
-            stdout, stderr = proc.communicate(timeout=self._timeout)
+            stdout, stderr = proc.communicate(input=prompt, timeout=self._timeout)
         except subprocess.TimeoutExpired:
             kill_process_tree(proc)
             raise
         return subprocess.CompletedProcess(cmd, proc.returncode, stdout, stderr)
+
+    def _persona_builder(self):
+        """Build the persona from the owner's files when no builder was injected.
+
+        ``jarvis ask`` wires a ``SystemPromptBuilder`` for the engine path, but an
+        agent constructed directly -- which is how the conductor and the brain
+        loop build it -- gets none, and then falls back to the generic default.
+        The result is an assistant that answers with the identity of the CLI it
+        runs on instead of the owner's, which defeats the point of SOUL.md.
+
+        Cached after the first call: the files do not change mid-run, and reading
+        them per turn would add I/O to every prompt.
+        """
+        if self._persona_cache is not None:
+            return self._persona_cache
+        try:
+            from openjarvis.core.config import load_config
+            from openjarvis.prompt.builder import SystemPromptBuilder
+
+            cfg = load_config()
+            template = (cfg.agent.system_prompt or "").strip()
+            if not template and cfg.agent.system_prompt_path:
+                template = _read_text(cfg.agent.system_prompt_path)
+            self._persona_cache = SystemPromptBuilder(
+                template or cfg.agent.default_system_prompt,
+                memory_files_config=cfg.memory_files,
+            )
+        except Exception:  # noqa: BLE001 -- persona is a nicety, never a blocker
+            logger.debug("could not build persona; falling back", exc_info=True)
+            self._persona_cache = False
+        return self._persona_cache
+
+    def _compose(self, input: str, context: Optional[AgentContext]) -> str:
+        """Fold the persona and prior turns into the single prompt the CLI takes.
+
+        The CLI has no ``--system-prompt`` flag: it ships its own instructions and
+        reads the rest from the prompt. So an agent built on it that passes the
+        raw input throws the persona away -- SOUL.md, MEMORY.md, USER.md and the
+        conversation so far never reach the model, and the assistant answers as
+        the CLI's own identity instead of the owner's. Measured: the CLI DOES
+        honour an identity instruction carried in the prompt.
+
+        Everything is folded into one prompt, with the persona first. Roles are
+        labelled so the model can tell instruction from history from question.
+
+        Kept on ONE line: a prompt with newlines makes ``--resume`` open a NEW
+        session instead of appending to the target -- measured, and the cause of
+        a day of "no new turn recorded".
+        """
+        if self._prompt_builder is None:
+            builder = self._persona_builder()
+            if builder:
+                self._prompt_builder = builder
+
+        parts: List[str] = []
+        for message in self._build_messages(input, context):
+            text = (message.content or "").strip()
+            if not text:
+                continue
+            if message.role == Role.SYSTEM:
+                parts.append(f"[INSTRUCOES] {text}")
+            elif message.role == Role.ASSISTANT:
+                parts.append(f"[VOCE DISSE] {text}")
+            else:
+                parts.append(f"[USUARIO] {text}")
+        return " ".join(" ".join(part.split()) for part in parts)
 
     def run(
         self,
@@ -316,7 +401,7 @@ class CopilotCliAgent(BaseAgent):
             )
 
         try:
-            proc = self._spawn(self._build_command(input))
+            proc = self._spawn(self._build_command(), self._compose(input, context))
         except subprocess.TimeoutExpired:
             self._emit_turn_end(turns=1, error=True)
             return AgentResult(

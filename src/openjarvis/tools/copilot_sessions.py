@@ -212,7 +212,8 @@ class CopilotSessionsTool(BaseTool):
 
     def _detail(self, conn: sqlite3.Connection, session_id: str) -> Dict[str, Any]:
         session = conn.execute(
-            "SELECT id, summary, cwd, repository, branch, host_type, created_at, updated_at "
+            "SELECT id, summary, cwd, repository, branch, host_type, "
+            "created_at, updated_at "
             "FROM sessions WHERE id = ?",
             (session_id,),
         ).fetchone()
