@@ -83,7 +83,9 @@ class SessionReader(Protocol):
 class ResumeExecutor(Protocol):
     """Sends one new turn into an existing session."""
 
-    def resume(self, session_id: str, prompt: str) -> ResumeResult: ...
+    def resume(
+        self, session_id: str, prompt: str, *, cwd: str = "", turns: int = 0
+    ) -> ResumeResult: ...
 
 
 class ApprovalGate(Protocol):
@@ -99,6 +101,25 @@ class ApprovalGate(Protocol):
         tier: str,
     ) -> bool:
         """``True`` to act now; ``False`` to leave it pending for a human."""
+
+    def expire_stale(self) -> int:
+        """Expire old pending approvals before queuing or consuming decisions."""
+
+
+class ObservationRecorder(Protocol):
+    """Persists the outcome of a successful conductor action to semantic memory."""
+
+    def record(
+        self,
+        *,
+        session_id: str,
+        summary: str,
+        tier: str,
+        response: str,
+        fingerprint: str,
+        cwd: str = "",
+        repository: str = "",
+    ) -> None: ...
 
 
 class Notifier(Protocol):
@@ -152,11 +173,21 @@ class TickReport:
 DEFAULT_PROMPT = (
     "O Jarvis esta verificando esta sessao em nome do dono, que nao esta olhando "
     "agora.\n"
-    "NAO execute ferramentas e NAO altere arquivos: apenas relate.\n"
+    "NAO execute ferramentas e NAO altere arquivos: apenas relate, com base no "
+    "historico DESTA conversa.\n"
     "Responda em ate 5 linhas: (1) onde o trabalho parou, (2) qual e a proxima "
     "acao concreta, (3) se voce consegue seguir sozinho ou precisa de uma decisao "
     "do dono -- e, nesse caso, qual e a pergunta objetiva.\n"
-    "Ultimo checkpoint registrado: {next_steps}"
+    "Se a conversa nao tiver trabalho pendente, responda apenas: NADA PENDENTE.\n"
+    "{next_steps}"
+)
+
+#: Rendered in place of the checkpoint when the app never wrote one. Saying
+#: "no checkpoint" out loud beats an empty line: without it the session replies
+#: that no task was specified -- true of the prompt, useless to the owner, since
+#: the history is right there in the session being resumed.
+NO_CHECKPOINT_HINT = (
+    "Nao ha checkpoint registrado: baseie-se no que voce ja fez nesta sessao."
 )
 
 
@@ -173,6 +204,7 @@ class ConductorService:
         tiers: Optional[TierPolicy] = None,
         approvals: Optional[ApprovalGate] = None,
         notifier: Optional[Notifier] = None,
+        observation_recorder: Optional[ObservationRecorder] = None,
         owner: str = "",
         limit: int = 10,
         prompt_template: str = DEFAULT_PROMPT,
@@ -187,6 +219,7 @@ class ConductorService:
         self._tiers = tiers or TierPolicy()
         self._approvals = approvals
         self._notifier = notifier
+        self._observation_recorder = observation_recorder
         self._owner = owner or make_owner_id()
         self._limit = limit
         self._prompt_template = prompt_template
@@ -202,6 +235,8 @@ class ConductorService:
         """Run one full pass. Never raises for a single bad session."""
         report = TickReport()
         report.recovered = len(self._claims.recover_expired())
+        if self._approvals is not None and hasattr(self._approvals, "expire_stale"):
+            self._approvals.expire_stale()
 
         candidates = self._reader.list_idle(self._eligibility.idle_minutes, self._limit)
         for snapshot in candidates:
@@ -242,7 +277,7 @@ class ConductorService:
             return
 
         tier = self._tiers.classify(snapshot, next_steps=detail.next_steps)
-        if not self._authorised(snapshot, detail, tier):
+        if not self._authorised(snapshot, detail, tier, fingerprint):
             # Leave it for a human; release the lease so the next tick can pick
             # it up once the decision arrives.
             self._claims.mark_failed(
@@ -254,7 +289,11 @@ class ConductorService:
         self._execute(claim, snapshot, detail, tier, report)
 
     def _authorised(
-        self, snapshot: SessionSnapshot, detail: SessionDetail, tier: str
+        self,
+        snapshot: SessionSnapshot,
+        detail: SessionDetail,
+        tier: str,
+        fingerprint: ObservationFingerprint,
     ) -> bool:
         if tier in self._auto_tiers:
             return True
@@ -270,6 +309,7 @@ class ConductorService:
                 "session_id": snapshot.session_id,
                 "cwd": snapshot.cwd,
                 "next_steps": detail.next_steps,
+                "fingerprint": fingerprint.key,
             },
             permission_key=f"copilot_resume:{snapshot.repository or snapshot.cwd}",
             tier=tier,
@@ -302,11 +342,32 @@ class ConductorService:
             return
 
         prompt = self._prompt_template.format(
-            next_steps=detail.next_steps or "(sem checkpoint registrado)"
+            next_steps=(
+                f"Ultimo checkpoint registrado: {detail.next_steps}"
+                if detail.next_steps.strip()
+                else NO_CHECKPOINT_HINT
+            )
         )
-        result = self._executor.resume(snapshot.session_id, prompt)
+        result = self._executor.resume(
+            snapshot.session_id, prompt, cwd=snapshot.cwd, turns=snapshot.turns
+        )
 
         if not result.ok:
+            landed_after_error = self._await_new_turn(
+                snapshot.session_id, claim.fingerprint.turn_index
+            )
+            if landed_after_error is not None:
+                self._complete_success(
+                    claim,
+                    snapshot,
+                    tier,
+                    ResumeResult(
+                        ok=True,
+                        content=landed_after_error.assistant_response or result.error,
+                    ),
+                    report,
+                )
+                return
             self._claims.mark_failed(claim.key, claim.claim_token, error=result.error)
             report.failed.append(
                 TickOutcome(snapshot.session_id, "failed", result.error)
@@ -316,10 +377,8 @@ class ConductorService:
         # Verify the reply actually landed instead of trusting the exit code.
         # The app persists the turn shortly AFTER the CLI process exits, so
         # a single immediate read is a false failure; poll briefly instead.
-        landed = self._await_new_turn(
-            snapshot.session_id, claim.fingerprint.turn_index
-        )
-        if not landed:
+        landed = self._await_new_turn(snapshot.session_id, claim.fingerprint.turn_index)
+        if landed is None:
             self._claims.mark_failed(
                 claim.key, claim.claim_token, error="no new turn recorded"
             )
@@ -328,11 +387,52 @@ class ConductorService:
             )
             return
 
+        self._complete_success(claim, snapshot, tier, result, report)
+
+    def _complete_success(
+        self,
+        claim: Claim,
+        snapshot: SessionSnapshot,
+        tier: str,
+        result: ResumeResult,
+        report: TickReport,
+    ) -> None:
+        try:
+            self._record_observation(claim, snapshot, tier, result)
+        except Exception as exc:  # noqa: BLE001 - landed turns must not be retried
+            self._claims.mark_succeeded(
+                claim.key, claim.claim_token, detail=f"{tier}; memory failed"
+            )
+            report.failed.append(TickOutcome(snapshot.session_id, "failed", str(exc)))
+            return
+
         self._claims.mark_succeeded(claim.key, claim.claim_token, detail=tier)
         report.answered.append(TickOutcome(snapshot.session_id, "answered", tier))
         self._announce(snapshot, result)
 
-    def _await_new_turn(self, session_id: str, previous_index: int) -> bool:
+    def _record_observation(
+        self,
+        claim: Claim,
+        snapshot: SessionSnapshot,
+        tier: str,
+        result: ResumeResult,
+    ) -> None:
+        recorder = self._observation_recorder
+        if recorder is None:
+            return
+        recorder.record(
+            session_id=snapshot.session_id,
+            summary=snapshot.summary,
+            tier=tier,
+            response=result.content,
+            fingerprint=claim.fingerprint.key,
+            cwd=snapshot.cwd,
+            repository=snapshot.repository,
+        )
+
+    def _await_new_turn(
+        self, session_id: str, previous_index: int
+    ) -> Optional[SessionTurn]:
         """Poll for the reply to appear, tolerating the store's write lag."""
         deadline = time.monotonic() + self._readback_seconds
         while True:
@@ -342,9 +442,9 @@ class ConductorService:
                 and after.last_turn is not None
                 and after.last_turn.turn_index > previous_index
             ):
-                return True
+                return after.last_turn
             if time.monotonic() >= deadline:
-                return False
+                return None
             time.sleep(self._readback_interval)
 
     def _finish_conflict(
@@ -380,6 +480,7 @@ __all__ = [
     "ConductorService",
     "DEFAULT_PROMPT",
     "Notifier",
+    "ObservationRecorder",
     "ResumeExecutor",
     "ResumeResult",
     "SessionDetail",

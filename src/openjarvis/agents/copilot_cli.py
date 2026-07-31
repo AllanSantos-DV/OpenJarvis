@@ -36,6 +36,32 @@ from openjarvis.engine._stubs import InferenceEngine
 logger = logging.getLogger(__name__)
 
 #: Matches the session id in the CLI footer line ``Resume  copilot --resume=<uuid>``.
+#: Built-in tools that let a resumed session read, write or run things on
+#: this machine. Excluding them BY NAME is the only filter measured to hold:
+#: an empty `--available-tools=` is accepted and then ignored.
+#:
+#: Names the CLI does not recognise are reported and skipped, so the list can
+#: stay ahead of a CLI version without breaking the run.
+_SANDBOXED_TOOLS = (
+    "view",
+    "glob",
+    "grep",
+    "create",
+    "edit",
+    "powershell",
+    "list_powershell",
+    "read_powershell",
+    "stop_powershell",
+    "task",
+    "web_fetch",
+    "sql",
+    "session_store_sql",
+    "skill",
+    "read_agent",
+    "write_agent",
+    "list_agents",
+)
+
 _RESUME_RE = re.compile(r"--resume=([0-9a-fA-F-]{36})")
 
 #: First footer label emitted after the answer. Everything from here on is
@@ -194,7 +220,17 @@ class CopilotCliAgent(BaseAgent):
         if self._allow_all_tools:
             cmd.append("--allow-all-tools")
         else:
-            cmd.append(f"--available-tools={','.join(self._available_tools)}")
+            # `--available-tools=` with an EMPTY value is silently ignored by the
+            # CLI: measured, the session still ran `List directory`. Denying tools
+            # by name is what actually works, and it only holds together with
+            # `--disable-builtin-mcps` -- with just the built-ins excluded, the
+            # agent routed around them through the GitHub MCP server and read the
+            # tree anyway. With both, the session answers that it cannot comply.
+            if self._available_tools:
+                cmd.append(f"--available-tools={','.join(self._available_tools)}")
+            else:
+                cmd.append(f"--excluded-tools={','.join(_SANDBOXED_TOOLS)}")
+                cmd.append("--disable-builtin-mcps")
         if self._excluded_tools:
             cmd.append(f"--excluded-tools={','.join(self._excluded_tools)}")
         for tool in self._allow_tools:

@@ -53,8 +53,8 @@ class FakeExecutor:
         self.error = error
         self.calls: List[tuple] = []
 
-    def resume(self, session_id, prompt):
-        self.calls.append((session_id, prompt))
+    def resume(self, session_id, prompt, *, cwd="", turns=0):
+        self.calls.append((session_id, prompt, cwd))
         if not self.ok:
             return ResumeResult(ok=False, error=self.error or "boom")
         current = self.reader.details[session_id]
@@ -80,6 +80,27 @@ class RecordingGate:
     def request(self, **kwargs):
         self.requests.append(kwargs)
         return self.allow
+
+
+class ExpiringGate(RecordingGate):
+    def __init__(self, allow: bool) -> None:
+        super().__init__(allow)
+        self.expired = 0
+
+    def expire_stale(self):
+        self.expired += 1
+        return self.expired
+
+
+class FakeRecorder:
+    def __init__(self, *, fail: bool = False) -> None:
+        self.fail = fail
+        self.records: List[dict] = []
+
+    def record(self, **kwargs):
+        if self.fail:
+            raise RuntimeError("memory offline")
+        self.records.append(kwargs)
 
 
 def _snapshot(session_id="s-app", **kw):
@@ -137,6 +158,21 @@ def test_answers_an_eligible_idle_session(claims):
     assert [o.session_id for o in report.answered] == ["s-app"]
     assert executor.calls and executor.calls[0][0] == "s-app"
     assert "revisar Y" in executor.calls[0][1]
+    assert executor.calls[0][2] == r"C:\repo\projeto"
+
+
+def test_resume_uses_the_target_session_cwd_not_the_conductor_cwd(claims):
+    snap = _snapshot(turns=1, cwd=r"C:\Users\allan\work\target")
+    reader = FakeReader([snap], {snap.session_id: _detail(snap)})
+    executor = FakeExecutor(reader)
+
+    _service(reader, claims, executor).tick()
+
+    assert executor.calls[0] == (
+        "s-app",
+        executor.calls[0][1],
+        r"C:\Users\allan\work\target",
+    )
 
 
 def test_never_touches_a_cli_session(claims):
@@ -178,9 +214,7 @@ def test_ignores_sessions_outside_the_allowed_roots(claims):
         reader,
         claims,
         executor,
-        eligibility=EligibilityPolicy(
-            idle_minutes=10.0, allowed_roots=(r"C:\repo",)
-        ),
+        eligibility=EligibilityPolicy(idle_minutes=10.0, allowed_roots=(r"C:\repo",)),
     )
 
     service.tick()
@@ -209,8 +243,8 @@ def test_a_repeated_tick_without_new_activity_does_nothing(claims):
     reader = FakeReader([snap], {snap.session_id: detail})
 
     class FrozenExecutor(FakeExecutor):
-        def resume(self, session_id, prompt):
-            self.calls.append((session_id, prompt))
+        def resume(self, session_id, prompt, *, cwd="", turns=0):
+            self.calls.append((session_id, prompt, cwd))
             return ResumeResult(ok=True, content="ok")  # nothing lands
 
     executor = FrozenExecutor(reader)
@@ -229,8 +263,8 @@ def test_missing_new_turn_is_a_failure_not_a_success(claims):
     reader = FakeReader([snap], {snap.session_id: _detail(snap)})
 
     class LyingExecutor(FakeExecutor):
-        def resume(self, session_id, prompt):
-            self.calls.append((session_id, prompt))
+        def resume(self, session_id, prompt, *, cwd="", turns=0):
+            self.calls.append((session_id, prompt, cwd))
             return ResumeResult(ok=True, content="disse que fez")
 
     report = _service(reader, claims, LyingExecutor(reader)).tick()
@@ -273,6 +307,7 @@ def test_risky_session_requires_approval(claims):
     assert executor.calls == []
     assert report.pending[0].detail == TIER_HIGH
     assert gate.requests[0]["tier"] == TIER_HIGH
+    assert gate.requests[0]["payload"]["fingerprint"]
 
 
 def test_approved_risky_session_is_answered(claims):
@@ -287,6 +322,17 @@ def test_approved_risky_session_is_answered(claims):
     assert executor.calls
 
 
+def test_approval_gate_expires_stale_actions_at_tick_start(claims):
+    snap = _snapshot(repository="owner/infra-prod", turns=20)
+    reader = FakeReader([snap], {snap.session_id: _detail(snap)})
+    executor = FakeExecutor(reader)
+    gate = ExpiringGate(allow=False)
+
+    _service(reader, claims, executor, approvals=gate).tick()
+
+    assert gate.expired == 1
+
+
 def test_without_an_approval_gate_only_trivial_runs(claims):
     """Fail closed: no gate configured must not mean 'do whatever you want'."""
     risky = _snapshot(session_id="s-risky", turns=20)
@@ -298,6 +344,7 @@ def test_without_an_approval_gate_only_trivial_runs(claims):
     assert executor.calls == []
     assert report.pending
 
+
 def test_executor_failure_is_reported_and_retryable(claims):
     snap = _snapshot(turns=1)
     reader = FakeReader([snap], {snap.session_id: _detail(snap)})
@@ -307,6 +354,22 @@ def test_executor_failure_is_reported_and_retryable(claims):
 
     assert report.answered == []
     assert report.failed[0].detail == "quota exceeded"
+
+
+def test_executor_timeout_after_landing_is_success_not_retry(claims):
+    snap = _snapshot(turns=1)
+    reader = FakeReader([snap], {snap.session_id: _detail(snap)})
+
+    class LateTimeoutExecutor(FakeExecutor):
+        def resume(self, session_id, prompt, *, cwd="", turns=0):
+            super().resume(session_id, prompt, cwd=cwd)
+            return ResumeResult(ok=False, error="Copilot CLI timed out after 300s.")
+
+    report = _service(reader, claims, LateTimeoutExecutor(reader)).tick()
+
+    assert report.acted == 1
+    assert report.failed == []
+    assert claims.audit(1)[0].event == "succeeded"
 
 
 def test_one_broken_session_does_not_stop_the_tick(claims):
@@ -342,6 +405,64 @@ def test_tick_recovers_orphaned_claims_first(claims):
     report = _service(reader, claims, FakeExecutor(reader)).tick()
 
     assert report.recovered == 1
+
+
+def test_crashed_running_claim_is_recovered_and_retried_next_tick(tmp_path):
+    snap = _snapshot(turns=1)
+    reader = FakeReader([snap], {snap.session_id: _detail(snap)})
+    store = SqliteClaimStore(
+        tmp_path / "claims.db",
+        policy=RetryPolicy(lease_seconds=-1, backoff_seconds=0),
+    )
+    try:
+        fingerprint = ConductorService._fingerprint(
+            snap.session_id, reader.details[snap.session_id].last_turn
+        )
+        claim = store.acquire(fingerprint, "dead-owner")
+        store.mark_running(claim.key, claim.claim_token)
+        executor = FakeExecutor(reader)
+
+        report = _service(reader, store, executor).tick()
+
+        assert report.recovered == 1
+        assert report.acted == 1
+        assert len(executor.calls) == 1
+    finally:
+        store.close()
+
+
+def test_successful_tick_records_observation_in_memory(claims):
+    snap = _snapshot(turns=1)
+    reader = FakeReader([snap], {snap.session_id: _detail(snap)})
+    recorder = FakeRecorder()
+
+    report = _service(
+        reader,
+        claims,
+        FakeExecutor(reader),
+        observation_recorder=recorder,
+    ).tick()
+
+    assert report.acted == 1
+    assert recorder.records[0]["session_id"] == "s-app"
+    assert recorder.records[0]["tier"] == "trivial"
+    assert recorder.records[0]["response"] == "continuei"
+    assert recorder.records[0]["fingerprint"]
+
+
+def test_memory_failure_is_visible_without_retrying_the_landed_turn(claims):
+    snap = _snapshot(turns=1)
+    reader = FakeReader([snap], {snap.session_id: _detail(snap)})
+
+    report = _service(
+        reader,
+        claims,
+        FakeExecutor(reader),
+        observation_recorder=FakeRecorder(fail=True),
+    ).tick()
+
+    assert report.answered == []
+    assert report.failed[0].detail == "memory offline"
 
 
 def test_report_summary_is_speakable(claims):

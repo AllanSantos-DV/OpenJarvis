@@ -107,29 +107,43 @@ class CopilotCliResumeExecutor:
         self,
         *,
         model: str = "auto",
-        timeout: int = 300,
+        timeout: int = 120,
+        per_turn_seconds: int = 4,
+        max_timeout: int = 600,
         available_tools: Optional[Sequence[str]] = None,
         agent_factory: Optional[Any] = None,
         env: Optional[Dict[str, str]] = None,
     ) -> None:
         self._model = model
         self._timeout = timeout
+        self._per_turn_seconds = per_turn_seconds
+        self._max_timeout = max_timeout
         self._available_tools = list(available_tools) if available_tools else None
         self._agent_factory = agent_factory
         self._env = dict(UNATTENDED_ENV)
         if env:
             self._env.update(env)
 
-    def resume(self, session_id: str, prompt: str) -> ResumeResult:
-        agent = self._build_agent(session_id)
+    def resume(
+        self, session_id: str, prompt: str, *, cwd: str = "", turns: int = 0
+    ) -> ResumeResult:
+        # Resuming replays the whole conversation, so a long session costs
+        # several times the tokens and the wall clock of a fresh one. A single
+        # fixed timeout therefore kills exactly the sessions most worth
+        # answering; scale the budget with the history instead.
+        timeout = min(
+            self._max_timeout,
+            self._timeout + int(turns) * self._per_turn_seconds,
+        )
+        agent = self._build_agent(session_id, cwd=cwd, timeout=timeout)
         result = agent.run(prompt)
         if result.metadata.get("error"):
             return ResumeResult(ok=False, error=result.content)
         return ResumeResult(ok=True, content=result.content)
 
-    def _build_agent(self, session_id: str):
+    def _build_agent(self, session_id: str, *, cwd: str = "", timeout: int = 0):
         if self._agent_factory is not None:
-            return self._agent_factory(session_id)
+            return self._agent_factory(session_id, workspace=cwd)
 
         from openjarvis.agents.copilot_cli import CopilotCliAgent
 
@@ -138,8 +152,9 @@ class CopilotCliResumeExecutor:
             self._model,
             temperature=0.7,
             max_tokens=1024,
+            workspace=cwd,
             session_id=session_id,
-            timeout=self._timeout,
+            timeout=timeout or self._timeout,
             available_tools=self._available_tools,
             env=self._env,
         )
@@ -167,6 +182,9 @@ class ApprovalStoreGate:
         self._store = store
         self._ttl_hours = ttl_hours
 
+    def expire_stale(self) -> int:
+        return int(self._store.expire_stale())
+
     def request(
         self,
         *,
@@ -183,6 +201,14 @@ class ApprovalStoreGate:
             STATUS_EXECUTED,
         )
 
+        payload = dict(payload)
+        payload.setdefault(
+            "text_fallback",
+            "Fallback textual: use ApprovalStore.list_pending() para ver esta "
+            "pendencia e ApprovalStore.update_status(id, 'approved'|'denied') "
+            "para decidir sem voz.",
+        )
+
         remembered = self._store.get_permission(permission_key)
         if remembered is not None:
             if remembered.decision == DECISION_ALWAYS_APPROVE:
@@ -195,6 +221,7 @@ class ApprovalStoreGate:
             if (
                 action.action_type == action_type
                 and action.payload.get("session_id") == payload.get("session_id")
+                and action.payload.get("fingerprint") == payload.get("fingerprint")
                 and action.status == STATUS_APPROVED
             ):
                 self._store.update_status(action.id, STATUS_EXECUTED)
@@ -209,6 +236,54 @@ class ApprovalStoreGate:
             ttl_hours=self._ttl_hours,
         )
         return False
+
+
+class NativeJavaObservationRecorder:
+    """Store successful conductor outcomes in project-scoped semantic memory."""
+
+    def __init__(
+        self,
+        backend: Optional[Any] = None,
+        *,
+        project_id: str = "AllanSantos-DV/jarvis-home",
+    ) -> None:
+        if backend is None:
+            from openjarvis.tools.storage.native_java import NativeJavaMemoryBackend
+
+            backend = NativeJavaMemoryBackend(project_id=project_id)
+        self._backend = backend
+
+    def record(
+        self,
+        *,
+        session_id: str,
+        summary: str,
+        tier: str,
+        response: str,
+        fingerprint: str,
+        cwd: str = "",
+        repository: str = "",
+    ) -> None:
+        content = (
+            "Jarvis Conductor observation\n"
+            f"session: {session_id}\n"
+            f"summary: {summary or '(sem resumo)'}\n"
+            f"tier: {tier}\n"
+            f"response: {response or '(sem resposta)'}\n"
+            f"fingerprint: {fingerprint}"
+        )
+        self._backend.store(
+            content,
+            source="jarvis-conductor",
+            metadata={
+                "kind": "conductor_observation",
+                "session_id": session_id,
+                "tier": tier,
+                "fingerprint": fingerprint,
+                "cwd": cwd,
+                "repository": repository,
+            },
+        )
 
 
 class VoiceNotifier:
@@ -247,5 +322,6 @@ __all__ = [
     "CopilotCliResumeExecutor",
     "CopilotSessionsReader",
     "LoggingNotifier",
+    "NativeJavaObservationRecorder",
     "VoiceNotifier",
 ]

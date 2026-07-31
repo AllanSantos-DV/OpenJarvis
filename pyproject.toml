@@ -204,6 +204,7 @@ markers = [
     "amd: requires AMD GPU",
     "apple: requires Apple Silicon",
     "cloud: requires cloud API keys",
+    "contract: runs external binary/API contract probes",
     "docker: requires a working Docker daemon (no GPU required)",
     "live: requires running inference engine",
     "macos15: requires macOS 15+ (Sequoia) for Apple FM",

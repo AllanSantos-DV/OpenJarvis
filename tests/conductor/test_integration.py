@@ -102,8 +102,10 @@ class FakeCli:
         self.land = land
         self.calls = []
 
-    def resume(self, session_id: str, prompt: str) -> ResumeResult:
-        self.calls.append((session_id, prompt))
+    def resume(
+        self, session_id: str, prompt: str, *, cwd: str = "", turns: int = 0
+    ) -> ResumeResult:
+        self.calls.append((session_id, prompt, cwd))
         if not self.ok:
             return ResumeResult(ok=False, error="cli failed")
         if self.land:
@@ -131,9 +133,7 @@ def _service(session_store, tmp_path, executor, **kw):
     kw.setdefault("eligibility", EligibilityPolicy(idle_minutes=10.0))
     kw.setdefault("tiers", TierPolicy(trivial_max_turns=5))
     kw.setdefault("readback_seconds", 0.0)
-    service = ConductorService(
-        reader=reader, claims=claims, executor=executor, **kw
-    )
+    service = ConductorService(reader=reader, claims=claims, executor=executor, **kw)
     return service, claims
 
 
@@ -148,6 +148,7 @@ def test_answers_the_app_session_and_records_the_turn(session_store, tmp_path):
     assert [o.session_id for o in report.answered] == ["app-1"]
     assert cli.calls[0][0] == "app-1"
     assert "implementar a fase 3" in cli.calls[0][1]
+    assert cli.calls[0][2] == "C:/repo/projeto"
 
     conn = sqlite3.connect(session_store)
     count = conn.execute(
@@ -175,16 +176,16 @@ def test_the_cli_session_is_never_touched(session_store, tmp_path):
     assert count == 1
 
 
-def test_a_second_tick_does_not_answer_the_same_turn_again(session_store, tmp_path):
+def test_soak_repeated_ticks_do_not_duplicate_the_landed_reply(session_store, tmp_path):
     cli = FakeCli(session_store)
     service, claims = _service(session_store, tmp_path, cli)
     try:
-        service.tick()
-        service.tick()
+        for _ in range(5):
+            service.tick()
     finally:
         claims.close()
 
-    # The second tick sees a fresh turn (the reply) which is not idle yet.
+    # The reply has a fresh timestamp, so later ticks do not re-answer it.
     assert len(cli.calls) == 1
 
 
@@ -205,7 +206,7 @@ def test_conductor_writes_nothing_into_the_app_store(session_store, tmp_path):
     before = session_store.stat().st_mtime_ns
 
     class NoopExecutor:
-        def resume(self, session_id, prompt):
+        def resume(self, session_id, prompt, *, cwd="", turns=0):
             return ResumeResult(ok=False, error="not sending")
 
     service, claims = _service(session_store, tmp_path, NoopExecutor())

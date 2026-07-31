@@ -52,6 +52,7 @@ def build_service(
     store_path: Optional[str] = None,
     dry_run: bool = False,
     speak: bool = True,
+    resume_timeout: int = 120,
 ) -> ConductorService:
     """Wire the real adapters into the pure service."""
     from openjarvis.conductor.adapters import (
@@ -59,6 +60,7 @@ def build_service(
         CopilotCliResumeExecutor,
         CopilotSessionsReader,
         LoggingNotifier,
+        NativeJavaObservationRecorder,
         VoiceNotifier,
     )
     from openjarvis.conductor.service import ResumeResult
@@ -66,7 +68,9 @@ def build_service(
     class _DryRunExecutor:
         """Reports what it would do without touching any session."""
 
-        def resume(self, session_id: str, prompt: str) -> ResumeResult:
+        def resume(
+            self, session_id: str, prompt: str, *, cwd: str = ""
+        ) -> ResumeResult:
             logger.info("[dry-run] would resume %s", session_id)
             return ResumeResult(ok=False, error="dry-run: nothing was sent")
 
@@ -75,7 +79,14 @@ def build_service(
     return ConductorService(
         reader=CopilotSessionsReader(store_path=store_path),
         claims=SqliteClaimStore(claims_path, policy=RetryPolicy()),
-        executor=_DryRunExecutor() if dry_run else CopilotCliResumeExecutor(),
+        # A resumed session answers in roughly a minute; a much larger budget
+        # only means one slow session eats the whole tick, and the CLI keeps
+        # running while every other stalled session waits its turn.
+        executor=(
+            _DryRunExecutor()
+            if dry_run
+            else CopilotCliResumeExecutor(timeout=resume_timeout)
+        ),
         eligibility=EligibilityPolicy(
             own_session_id=own_session_id,
             idle_minutes=idle_minutes,
@@ -84,6 +95,7 @@ def build_service(
         tiers=TierPolicy(),
         approvals=ApprovalStoreGate(),
         notifier=notifier,
+        observation_recorder=None if dry_run else NativeJavaObservationRecorder(),
         limit=limit,
     )
 
@@ -134,6 +146,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     parser.add_argument("--allowed-root", action="append", default=[])
     parser.add_argument("--claims-db", default=None)
     parser.add_argument("--session-store", default=None)
+    parser.add_argument("--resume-timeout", type=int, default=120)
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--quiet", action="store_true", help="do not speak results")
     parser.add_argument("--log-level", default="INFO")
@@ -155,6 +168,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             store_path=args.session_store,
             dry_run=args.dry_run,
             speak=not args.quiet,
+            resume_timeout=args.resume_timeout,
         )
         report = run(
             service,

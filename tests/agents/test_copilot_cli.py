@@ -90,7 +90,7 @@ def test_build_command_uses_absolute_binary(monkeypatch):
 
     assert cmd[0] == r"C:\npm\copilot.CMD"
     # Secure-by-default: zero tools visible, no blanket tool grant.
-    assert "--available-tools=" in cmd
+    assert any(c.startswith("--excluded-tools=") for c in cmd)
     assert "--allow-all-tools" not in cmd
 
 
@@ -210,7 +210,7 @@ def test_default_agent_exposes_zero_tools_and_never_allows_all():
     value and NO --allow-all-tools anywhere in argv."""
     cmd = _agent()._build_command("oi")
 
-    assert "--available-tools=" in cmd
+    assert any(c.startswith("--excluded-tools=") for c in cmd)
     assert not any(part == "--allow-all-tools" for part in cmd)
     assert not any("--allow-all-tools" in part for part in cmd)
 
@@ -403,3 +403,48 @@ def test_run_timeout_still_reports_timeout_metadata_when_tree_kill_itself_fails(
     result = _agent(timeout=1).run("oi")
 
     assert result.metadata["error_type"] == "timeout"
+
+
+# ---------------------------------------------------------------------------
+# The empty `--available-tools=` flag looked like a zero-tools sandbox and was
+# not: the CLI accepts it and still runs tools. These pin the mechanism that was
+# actually measured to hold, so the regression cannot come back silently.
+# ---------------------------------------------------------------------------
+
+
+def test_default_denies_dangerous_builtins_by_name(monkeypatch):
+    monkeypatch.setattr(
+        "openjarvis.agents.copilot_cli._resolve_binary", lambda: "copilot"
+    )
+    cmd = _agent()._build_command("oi")
+    excluded = next(c for c in cmd if c.startswith("--excluded-tools="))
+
+    for tool in ("powershell", "view", "create", "edit", "task"):
+        assert tool in excluded
+
+
+def test_default_never_relies_on_empty_available_tools(monkeypatch):
+    """An empty value is silently ignored by the CLI, so it must not be used."""
+    monkeypatch.setattr(
+        "openjarvis.agents.copilot_cli._resolve_binary", lambda: "copilot"
+    )
+    assert "--available-tools=" not in _agent()._build_command("oi")
+
+
+def test_default_disables_mcp_servers(monkeypatch):
+    """Excluding built-ins alone is bypassable: the agent reached the filesystem
+    through the GitHub MCP server until these were disabled together."""
+    monkeypatch.setattr(
+        "openjarvis.agents.copilot_cli._resolve_binary", lambda: "copilot"
+    )
+    assert "--disable-builtin-mcps" in _agent()._build_command("oi")
+
+
+def test_explicit_allowlist_replaces_the_deny_list(monkeypatch):
+    """An opt-in allowlist is a narrower grant, so the blanket deny is dropped."""
+    monkeypatch.setattr(
+        "openjarvis.agents.copilot_cli._resolve_binary", lambda: "copilot"
+    )
+    cmd = _agent(available_tools=["view"])._build_command("oi")
+
+    assert "--available-tools=view" in cmd
