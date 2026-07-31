@@ -28,6 +28,7 @@ from typing import Any, Dict, List, Optional
 from openjarvis.core.registry import ToolRegistry
 from openjarvis.core.utils import kill_process_tree
 from openjarvis.tools._stubs import BaseTool, ToolResult, ToolSpec
+from openjarvis.tools.mcp_bridge_config import mcp_flags
 
 logger = logging.getLogger(__name__)
 
@@ -162,7 +163,8 @@ class CopilotIdeTool(BaseTool):
             return self._fail(f"Diretorio inexistente: {cwd}")
 
         proc = _run(
-            [_binary(), "--no-color", "--log-level", "none", "--no-ask-user"],
+            [_binary(), "--no-color", "--log-level", "none", "--no-ask-user"]
+            + mcp_flags(),
             prompt=prompt,
             cwd=cwd,
             timeout=_OPEN_TIMEOUT,
@@ -201,7 +203,8 @@ class CopilotIdeTool(BaseTool):
                 "--log-level",
                 "none",
                 "--no-ask-user",
-            ],
+            ]
+            + mcp_flags(),
             prompt=prompt,
             cwd=cwd,
             timeout=_SEND_TIMEOUT,

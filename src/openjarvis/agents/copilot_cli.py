@@ -254,7 +254,15 @@ class CopilotCliAgent(BaseAgent):
                 # unable to continue its own work, which is the whole point of
                 # resuming it. The conductor limits blast radius by choosing
                 # WHICH sessions it answers, not by crippling them.
-                pass
+                #
+                # Its MCP servers come along too. Measured: a headless child
+                # gets NONE by default -- the CLI reads ~/.copilot/mcp-config.json,
+                # which is empty here, because the owner's servers live in the
+                # mcp-bridge, an extension of the *app*. Without this the session
+                # silently loses tools it had when he opened it.
+                from openjarvis.tools.mcp_bridge_config import mcp_flags
+
+                cmd += mcp_flags()
             elif self._available_tools:
                 cmd.append(f"--available-tools={','.join(self._available_tools)}")
             else:
