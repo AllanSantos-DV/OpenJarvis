@@ -28,7 +28,7 @@ from typing import Any, Dict, List, Optional
 from openjarvis.core.registry import ToolRegistry
 from openjarvis.core.utils import kill_process_tree
 from openjarvis.tools._stubs import BaseTool, ToolResult, ToolSpec
-from openjarvis.tools.mcp_bridge_config import mcp_flags
+from openjarvis.tools.mcp_bridge_config import excluded_servers, mcp_flags
 
 logger = logging.getLogger(__name__)
 
@@ -178,8 +178,12 @@ class CopilotIdeTool(BaseTool):
         return ToolResult(
             tool_name=self.tool_id,
             success=True,
-            content=_answer(proc),
-            metadata={"session_id": session_id, "cwd": cwd},
+            content=_with_missing_tools(_answer(proc)),
+            metadata={
+                "session_id": session_id,
+                "cwd": cwd,
+                "mcp_excluded": excluded_servers(),
+            },
         )
 
     def _send(self, params: Dict[str, Any]) -> ToolResult:
@@ -249,6 +253,21 @@ class CopilotIdeTool(BaseTool):
         if not result.success or not isinstance(result.content, dict):
             return None
         return dict(result.content)
+
+
+def _with_missing_tools(answer: str) -> str:
+    """Append what the session could NOT reach, so the gap is visible.
+
+    ``excluded_servers`` has always known which MCP servers stay behind, but the
+    knowledge lived in a log line. A session that quietly does less than asked is
+    the failure this whole path exists to prevent, and a warning nobody reads
+    prevents nothing -- so it rides back with the answer, where the caller (and
+    the owner, through the notifier) actually sees it.
+    """
+    missing = excluded_servers()
+    if not missing:
+        return answer
+    return f"{answer}\n\n[sem acesso a: {'; '.join(missing)}]"
 
 
 def _binary() -> str:

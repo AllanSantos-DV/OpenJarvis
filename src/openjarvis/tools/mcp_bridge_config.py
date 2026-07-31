@@ -21,6 +21,21 @@ The config flag is additive and per-invocation on purpose: populating the global
 ``mcp-config.json`` would make the app and the CLI connect to the same servers
 in parallel whenever the IDE is open. Permission is granted per SERVER and only
 for servers the owner already configured -- nothing here widens what he had.
+
+**Why ALL of them, rather than a per-task subset.** Measured: a headless child
+LOSES the servers. That a session should get them back is a product decision,
+and it is this one -- a session Jarvis opens is doing the owner's work in the
+owner's projects, and he was explicit that a session he takes over by hand must
+still work. Handing it a narrower toolset than he would have had makes Jarvis's
+sessions second-class and reintroduces, from the other side, the "quietly does
+less" failure this module exists to prevent.
+
+The counter-argument is real: a task that only edits files does not need every
+server, and a smaller surface is a smaller blast radius. It is not taken here
+because the boundary would have to be guessed per task, and guessing wrong is
+silent -- the agent plans around a tool it does not have. If a per-task subset
+is ever wanted, it belongs as an explicit parameter on the call, chosen by the
+caller who knows the task, not inferred here.
 """
 
 from __future__ import annotations

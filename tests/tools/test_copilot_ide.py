@@ -197,6 +197,40 @@ def test_no_servers_means_no_flag_at_the_callsite(spy, tmp_path, monkeypatch):
     assert not any("additional-mcp-config" in part for part in seen["argv"])
 
 
+def test_the_answer_says_what_the_session_could_not_reach(spy, tmp_path, monkeypatch):
+    """The gap has to arrive with the answer, not sit in a log.
+
+    A session that quietly does less than it was asked is the failure this whole
+    path exists to prevent -- and `excluded_servers` knowing the answer helps
+    nobody if the knowledge never leaves the module.
+    """
+    monkeypatch.setattr(
+        copilot_ide,
+        "excluded_servers",
+        lambda *a, **k: ["atlassian (exige login pelo navegador)"],
+    )
+    spy()
+    result = CopilotIdeTool().execute(
+        action="open", prompt="tarefa", cwd=str(tmp_path)
+    )
+
+    assert "sem acesso a" in result.content
+    assert "atlassian" in result.content
+    assert result.metadata["mcp_excluded"] == [
+        "atlassian (exige login pelo navegador)"
+    ]
+
+
+def test_nothing_missing_means_no_noise(spy, tmp_path, monkeypatch):
+    monkeypatch.setattr(copilot_ide, "excluded_servers", lambda *a, **k: [])
+    spy()
+    result = CopilotIdeTool().execute(
+        action="open", prompt="tarefa", cwd=str(tmp_path)
+    )
+
+    assert "sem acesso" not in result.content
+
+
 def test_send_without_a_session_id_is_refused():
     result = CopilotIdeTool().execute(action="send", prompt="continue")
     assert not result.success
