@@ -209,7 +209,7 @@ class ConductorService:
         limit: int = 10,
         prompt_template: str = DEFAULT_PROMPT,
         auto_tiers: Sequence[str] = (TIER_TRIVIAL,),
-        readback_seconds: float = 20.0,
+        readback_seconds: float = 120.0,
         readback_interval: float = 1.0,
     ) -> None:
         self._reader = reader
@@ -433,7 +433,13 @@ class ConductorService:
     def _await_new_turn(
         self, session_id: str, previous_index: int
     ) -> Optional[SessionTurn]:
-        """Poll for the reply to appear, tolerating the store's write lag."""
+        """Poll for the reply to appear, tolerating the store's write lag.
+
+        The app persists the turn well after the CLI process exits -- measured at
+        roughly a minute and a half on a resumed session. A short window here
+        reports a false failure and, worse, burns a retry on work that actually
+        succeeded.
+        """
         deadline = time.monotonic() + self._readback_seconds
         while True:
             after = self._reader.detail(session_id)
