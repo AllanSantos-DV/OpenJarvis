@@ -19,7 +19,13 @@ import pytest
 from openjarvis.conductor.adapters import CopilotSessionsReader
 from openjarvis.conductor.models import RetryPolicy
 from openjarvis.conductor.policy import EligibilityPolicy, TierPolicy
-from openjarvis.conductor.runner import StartupError, check_credentials, run
+from openjarvis.conductor.runner import (
+    StartupError,
+    check_credentials,
+    check_unattended,
+    main,
+    run,
+)
 from openjarvis.conductor.runtime_lock import FileRuntimeLock
 from openjarvis.conductor.service import ConductorService, ResumeResult
 from openjarvis.conductor.state import SqliteClaimStore
@@ -235,6 +241,35 @@ def test_runner_refuses_to_start_without_a_token():
 def test_runner_accepts_either_token_variable():
     check_credentials({"GH_TOKEN": "x"})
     check_credentials({"GITHUB_TOKEN": "y"})
+
+
+def test_a_single_tick_per_launch_is_allowed():
+    # The default, and the mode the desktop shortcut uses: the owner clicked,
+    # the blast radius is one tick.
+    check_unattended(interval=0, max_ticks=None, dry_run=False)
+
+
+def test_watching_continuously_is_allowed():
+    check_unattended(interval=300, max_ticks=None, dry_run=True)
+
+
+def test_a_loop_of_declared_length_is_allowed():
+    check_unattended(interval=300, max_ticks=5, dry_run=False)
+
+
+def test_an_endless_answering_loop_is_refused():
+    # This is the mode whose only real safeguard would be OS-level containment
+    # -- an unprivileged user, a container, a scoped credential. None of that
+    # exists yet, so the door is closed rather than left ajar behind a flag
+    # that reads as innocently as `--interval 300`.
+    with pytest.raises(StartupError, match="containment"):
+        check_unattended(interval=300, max_ticks=None, dry_run=False)
+
+
+def test_main_refuses_the_endless_loop_before_touching_anything(monkeypatch):
+    monkeypatch.setenv("GH_TOKEN", "x")
+    exit_code = main(["--interval", "300"])
+    assert exit_code == 2
 
 
 def test_runner_refuses_a_second_conductor(session_store, tmp_path):

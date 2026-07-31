@@ -133,10 +133,12 @@ class CopilotCliAgent(BaseAgent):
     call starts a fresh CLI session; later calls reuse it via ``--resume`` so
     the conversation keeps its context (and benefits from prompt caching).
 
-    Secure by default: with no extra configuration the CLI is launched with
-    the dangerous built-ins denied by name and MCP servers off. The blanket
-    ``--allow-all-tools`` flag is **never** added unless the caller explicitly
-    passes ``allow_all_tools=True`` to the constructor.
+    Sandboxed by default: a fresh session created by this agent gets the
+    dangerous built-ins denied by name and MCP servers off, which is measured
+    to hold -- nothing was granted to it yet. Pass ``sandboxed=False`` to
+    resume a session the owner already trusts, which keeps the tools he gave
+    it. The blanket ``--allow-all-tools`` flag is **never** added unless the
+    caller explicitly passes ``allow_all_tools=True``.
     """
 
     agent_id = "copilot_cli"

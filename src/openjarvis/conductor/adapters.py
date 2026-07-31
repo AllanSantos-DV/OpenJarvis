@@ -108,9 +108,11 @@ UNATTENDED_ENV = {"VOICE_SUMMARY_MIN_CHARS": "1000000"}
 class CopilotCliResumeExecutor:
     """Sends a turn into an existing session through the Copilot CLI.
 
-    The agent is built per call with the session id, and inherits the secure
-    default: no tools are visible unless a caller opted into an explicit
-    allowlist. Answering a session must never be a blank cheque to run commands.
+    The agent is built per call with the session id and deliberately does NOT
+    sandbox: the session keeps the tools its owner granted it, because a
+    disarmed session cannot continue the work that made it worth resuming.
+    Containment is not what protects here -- selection is: which sessions are
+    eligible, which tier may answer unattended, and one claim per turn.
     """
 
     def __init__(
