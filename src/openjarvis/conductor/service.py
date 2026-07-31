@@ -172,12 +172,10 @@ class TickReport:
 #: Handing real autonomy back is a separate, explicit step.
 DEFAULT_PROMPT = (
     "O Jarvis esta retomando esta sessao em nome do dono, que nao esta olhando "
-    "agora.\n"
-    "Continue de onde parou, seguindo o plano ja combinado NESTA conversa.\n"
-    "Se houver uma decisao que so o dono pode tomar, NAO adivinhe: pare e "
-    "responda com a pergunta objetiva.\n"
-    "Se nao houver trabalho pendente, responda apenas: NADA PENDENTE.\n"
-    "{next_steps}"
+    "agora. Continue de onde parou, seguindo o plano ja combinado NESTA conversa. "
+    "Se houver uma decisao que so o dono pode tomar, NAO adivinhe: pare e responda "
+    "com a pergunta objetiva. Se nao houver trabalho pendente, responda apenas: "
+    "NADA PENDENTE. {next_steps}"
 )
 
 #: Rendered in place of the checkpoint when the app never wrote one. Saying

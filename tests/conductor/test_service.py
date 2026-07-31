@@ -473,3 +473,15 @@ def test_report_summary_is_speakable(claims):
 
     assert "answered=1" in report.summary()
     assert report.acted == 1
+
+
+def test_default_prompt_is_a_single_line():
+    """A newline in the prompt makes --resume open a NEW session instead of
+    appending to the target one. Measured: the reply landed under a fresh session
+    id while the original never moved, surfacing as a bogus 'no new turn
+    recorded'. This guard keeps that from coming back unnoticed."""
+    from openjarvis.conductor.service import DEFAULT_PROMPT, NO_CHECKPOINT_HINT
+
+    rendered = DEFAULT_PROMPT.format(next_steps=NO_CHECKPOINT_HINT)
+
+    assert "\n" not in rendered
