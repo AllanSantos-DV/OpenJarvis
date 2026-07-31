@@ -3,44 +3,45 @@
     Make Jarvis come back on its own after a reboot.
 
 .DESCRIPTION
-    Registers two logon tasks in Task Scheduler -- no Windows service wrapper,
-    no admin rights, nothing to maintain:
+    Registers ONE logon task in Task Scheduler -- no Windows service wrapper,
+    no admin rights, nothing to maintain.
 
-      * the API server (the brain's backend), started headless;
-      * the desktop app, which is the window the owner actually talks to.
+    The task runs the same launcher a desktop click runs, so there is exactly
+    one path that brings Jarvis up. An earlier version registered the server and
+    the window as two independent tasks, which is two ways to come up half-alive:
+    a window whose backend is not ready shows a connection error on its first
+    screen.
 
     Task Scheduler rather than a service because a service runs in session 0 and
     cannot show a window: the desktop app would start and be invisible. It also
     means this never needs elevation.
 
-    Both tasks are idempotent -- registering twice replaces, never duplicates.
+    Registering twice replaces, never duplicates.
 
 .EXAMPLE
     .\jarvis-autostart.ps1
-    Registers both tasks and starts them now.
-
-.EXAMPLE
-    .\jarvis-autostart.ps1 -ServerOnly
-    Only the backend (for a machine where the window is not wanted).
+    Registers the task and starts Jarvis now.
 
 .EXAMPLE
     .\jarvis-autostart.ps1 -Remove
-    Unregisters both.
+    Unregisters it.
 #>
 [CmdletBinding()]
 param(
-    [switch]$ServerOnly,
     [switch]$Remove,
     [switch]$NoStart
 )
 
 $ErrorActionPreference = 'Stop'
 $repoRoot = Split-Path -Parent $PSScriptRoot
-$python = Join-Path $repoRoot '.venv\Scripts\pythonw.exe'
-$app = Join-Path $repoRoot 'frontend\src-tauri\target\release\openjarvis-desktop.exe'
+$launcher = Join-Path $PSScriptRoot 'jarvis.ps1'
 
-$SERVER_TASK = 'Jarvis Server'
-$APP_TASK = 'Jarvis'
+$TASK = 'Jarvis'
+# The old layout registered the server and the window as two independent tasks.
+# That is two ways to be half-up: a window with no backend shows a connection
+# error on its first screen, and a backend with no window is invisible. One task
+# runs the launcher, which orders them and waits for the server to answer.
+$LEGACY = @('Jarvis Server')
 
 function Fail([string]$message) {
     Write-Host "jarvis-autostart: $message" -ForegroundColor Red
@@ -48,7 +49,7 @@ function Fail([string]$message) {
 }
 
 if ($Remove) {
-    foreach ($name in @($SERVER_TASK, $APP_TASK)) {
+    foreach ($name in @($TASK) + $LEGACY) {
         if (Get-ScheduledTask -TaskName $name -ErrorAction SilentlyContinue) {
             Unregister-ScheduledTask -TaskName $name -Confirm:$false
             Write-Host "removida: $name" -ForegroundColor Yellow
@@ -57,10 +58,16 @@ if ($Remove) {
     exit 0
 }
 
-# pythonw.exe, not python.exe: the console variant flashes a window on every
-# logon and leaves one sitting in the taskbar.
-if (-not (Test-Path $python)) {
-    Fail "interpretador nao encontrado em $python. Crie o venv com: uv venv --python 3.12"
+if (-not (Test-Path $launcher)) {
+    Fail "launcher nao encontrado em $launcher"
+}
+
+# Drop the old split tasks so they do not race the single one.
+foreach ($name in $LEGACY) {
+    if (Get-ScheduledTask -TaskName $name -ErrorAction SilentlyContinue) {
+        Unregister-ScheduledTask -TaskName $name -Confirm:$false
+        Write-Host "removida a tarefa antiga: $name" -ForegroundColor DarkGray
+    }
 }
 
 $trigger = New-ScheduledTaskTrigger -AtLogOn -User $env:USERNAME
@@ -72,47 +79,26 @@ $settings = New-ScheduledTaskSettingsSet `
     -StartWhenAvailable `
     -ExecutionTimeLimit ([TimeSpan]::Zero)
 
-$serverAction = New-ScheduledTaskAction `
-    -Execute $python `
-    -Argument '-m openjarvis.cli serve' `
+$action = New-ScheduledTaskAction `
+    -Execute 'powershell.exe' `
+    -Argument "-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$launcher`"" `
     -WorkingDirectory $repoRoot
 
 Register-ScheduledTask `
-    -TaskName $SERVER_TASK `
+    -TaskName $TASK `
     -Trigger $trigger `
-    -Action $serverAction `
+    -Action $action `
     -Settings $settings `
-    -Description 'Backend do Jarvis (API local)' `
+    -Description 'Sobe o Jarvis: servidor e janela' `
     -Force | Out-Null
-Write-Host "registrada: $SERVER_TASK" -ForegroundColor Green
-
-if (-not $ServerOnly) {
-    if (-not (Test-Path $app)) {
-        Write-Host "jarvis-autostart: o app ainda nao foi compilado ($app)." -ForegroundColor Yellow
-        Write-Host "  Compile com: cd frontend; npx tauri build" -ForegroundColor DarkGray
-    } else {
-        $appAction = New-ScheduledTaskAction -Execute $app -WorkingDirectory $repoRoot
-        Register-ScheduledTask `
-            -TaskName $APP_TASK `
-            -Trigger $trigger `
-            -Action $appAction `
-            -Settings $settings `
-            -Description 'A janela do Jarvis' `
-            -Force | Out-Null
-        Write-Host "registrada: $APP_TASK" -ForegroundColor Green
-    }
-}
+Write-Host "registrada: $TASK" -ForegroundColor Green
 
 if (-not $NoStart) {
-    foreach ($name in @($SERVER_TASK, $APP_TASK)) {
-        if (Get-ScheduledTask -TaskName $name -ErrorAction SilentlyContinue) {
-            Start-ScheduledTask -TaskName $name
-        }
-    }
+    Start-ScheduledTask -TaskName $TASK
     Write-Host 'jarvis-autostart: iniciado agora tambem.' -ForegroundColor Green
 }
 
 Write-Host ''
 Write-Host 'O Jarvis volta sozinho no proximo logon.' -ForegroundColor Cyan
-Write-Host '  conferir : Get-ScheduledTask -TaskName "Jarvis*"' -ForegroundColor DarkGray
+Write-Host '  conferir : Get-ScheduledTask -TaskName "Jarvis"' -ForegroundColor DarkGray
 Write-Host '  desfazer : .\jarvis-autostart.ps1 -Remove' -ForegroundColor DarkGray

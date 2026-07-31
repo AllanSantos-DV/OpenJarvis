@@ -147,6 +147,14 @@ class _VoxDaemonMixin:
                 pass
 
 
+#: Arguments ``VoxClient.transcribe_file`` accepts, besides the audio itself.
+#: Derived from the vendored SDK signature; anything else a generic caller
+#: passes (``format``, ``sample_rate``, ...) is dropped rather than forwarded.
+_TRANSCRIBE_ARGS = frozenset(
+    {"lang", "session", "priority", "profile", "model", "timeout"}
+)
+
+
 @SpeechRegistry.register("vox-engine")
 class VoxEngineSpeechBackend(_VoxDaemonMixin):
     """Speech-to-text backend delegating to the vox-engine daemon."""
@@ -172,23 +180,37 @@ class VoxEngineSpeechBackend(_VoxDaemonMixin):
         profile: str = "",
         **kwargs: Any,
     ) -> dict:
-        """Transcribe float32 PCM samples and return ``{"text": ...}``.
+        """Transcribe audio and return ``{"text": ...}``.
 
         Uses the SDK's ``transcribe_file`` track so recordings longer than
         Whisper's ~30s window are segmented by the daemon instead of being
         truncated. Without an explicit *profile* the engine picks the fast
         ``transcription`` one; pass ``transcription_hq`` for difficult audio.
+
+        Callers come from a generic speech interface and pass whatever their own
+        backend understood -- ``format="wav"``, ``sample_rate``, and so on.
+        Forwarding those blindly makes the SDK raise ``unexpected keyword
+        argument``, which surfaces to the user as "Speech transcription failed"
+        with no hint that the audio was fine and only the call was wrong.
+        Measured, in the owner's face. Only arguments this SDK actually accepts
+        are passed through; the rest are dropped, and logged once so a genuinely
+        needed one is not lost in silence.
         """
         client = self._ensure_client()
         chosen = profile or self._profile
         if chosen:
             kwargs["profile"] = chosen
 
+        accepted = {k: v for k, v in kwargs.items() if k in _TRANSCRIBE_ARGS}
+        ignored = sorted(set(kwargs) - set(accepted))
+        if ignored:
+            logger.debug("vox-engine ignores unsupported transcribe args: %s", ignored)
+
         text = client.transcribe_file(
             audio,
             lang=language or self._language,
             session=self._session,
-            **kwargs,
+            **accepted,
         )
         return {"text": text}
 

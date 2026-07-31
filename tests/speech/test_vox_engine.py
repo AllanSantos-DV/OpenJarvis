@@ -150,6 +150,39 @@ def test_transcribe_passes_profile_only_when_set():
     assert client.calls[1][1]["profile"] == "transcription_hq"
 
 
+def test_transcribe_drops_kwargs_the_sdk_does_not_accept():
+    """A generic caller passes what ITS backend understood, not what ours does.
+
+    The speech interface is shared, so callers hand over ``format="wav"``,
+    ``sample_rate=16000`` and similar. Forwarding those blindly made the SDK
+    raise ``unexpected keyword argument``, and that reached the owner as a bare
+    "Speech transcription failed (500)" -- no hint that the audio was fine and
+    only the call was wrong.
+    """
+    client = _FakeClient()
+    stt = _attach(VoxEngineSpeechBackend(), client)
+
+    result = stt.transcribe([0.0], format="wav", sample_rate=16000)
+
+    _, kwargs = client.calls[0]
+    assert "format" not in kwargs
+    assert "sample_rate" not in kwargs
+    assert result == {"text": "ok"}
+
+
+def test_transcribe_keeps_the_kwargs_the_sdk_does_accept():
+    """Dropping the unknown must not drop the known."""
+    client = _FakeClient()
+    stt = _attach(VoxEngineSpeechBackend(), client)
+
+    stt.transcribe([0.0], language="pt", profile="transcription_hq", timeout=60)
+
+    _, kwargs = client.calls[0]
+    assert kwargs["lang"] == "pt"
+    assert kwargs["profile"] == "transcription_hq"
+    assert kwargs["timeout"] == 60
+
+
 def test_health_probe_never_installs(monkeypatch):
     """A discovery health check must not trigger an install/first model load."""
     seen = {}
