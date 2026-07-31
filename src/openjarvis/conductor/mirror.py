@@ -133,10 +133,18 @@ def _parse_json(text: str) -> Optional[Dict[str, Any]]:
     if start < 0 or end <= start:
         return None
     try:
-        return json.loads(text[start : end + 1])
+        payload = json.loads(text[start : end + 1])
     except json.JSONDecodeError:
         logger.debug("mirror/shadow answer was not valid JSON: %s", text[:200])
         return None
+    # Valid JSON is not necessarily the OBJECT this promises to return, and
+    # every caller goes straight to `.get()`. `json.loads("4242")` is the same
+    # trap in miniature: it succeeds and yields an int. Enforce the contract
+    # here rather than have an AttributeError surface as "the shadow crashed".
+    if not isinstance(payload, dict):
+        logger.debug("mirror/shadow answer was JSON but not an object")
+        return None
+    return payload
 
 
 class MirrorShadow:

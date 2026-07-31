@@ -476,10 +476,17 @@ def test_report_summary_is_speakable(claims):
 
 
 def test_default_prompt_is_a_single_line():
-    """A newline in the prompt makes --resume open a NEW session instead of
-    appending to the target one. Measured: the reply landed under a fresh session
-    id while the original never moved, surfacing as a bogus 'no new turn
-    recorded'. This guard keeps that from coming back unnoticed."""
+    """A newline in the prompt used to make --resume open a NEW session.
+
+    Kept, but the reason changed. The failure was newline **in argv**, and the
+    prompt now travels on stdin -- measured after that move, a deliberately
+    multi-line prompt appends correctly, so the original bug is gone at the
+    root rather than avoided.
+
+    This stays as a cheap guard because the argv path is one refactor away, and
+    the failure it produced was invisible: turns landed in a session nobody was
+    watching while everything reported success.
+    """
     from openjarvis.conductor.service import DEFAULT_PROMPT, NO_CHECKPOINT_HINT
 
     rendered = DEFAULT_PROMPT.format(next_steps=NO_CHECKPOINT_HINT)

@@ -95,11 +95,15 @@ def test_resume_appends_to_the_same_session(tmp_path):
     _require_real_cli()
 
     profile = tmp_path / "profile"
-    store = _fresh_store(profile)
+    (profile / ".copilot").mkdir(parents=True)
+    # No hand-written schema and no COPILOT_SESSION_STORE: let the CLI create
+    # its own store. Measured -- the schema it builds has 17 tables, and the
+    # four-table stand-in this test used to impose left the turn unwritten,
+    # which read exactly like the resume bug it was meant to detect.
+    store = profile / ".copilot" / "session-store.db"
     env = {
         "USERPROFILE": str(profile),
         "HOME": str(profile),
-        "COPILOT_SESSION_STORE": str(store),
         "VOICE_SUMMARY_MIN_CHARS": "1000000",
     }
 
@@ -109,6 +113,10 @@ def test_resume_appends_to_the_same_session(tmp_path):
     assert first.metadata.get("error") is not True, first.content
     session_id = first.metadata.get("session_id", "")
     assert _UUID_RE.match(session_id)
+
+    # Same delay applies to the FIRST turn: without waiting for it, `before`
+    # reads 0 and the comparison below proves nothing.
+    assert _turn_lands(store, session_id, 0), "the first turn never landed"
 
     sessions_before = _session_ids(store)
     turns_before = _turn_count(store, session_id)
@@ -124,12 +132,74 @@ def test_resume_appends_to_the_same_session(tmp_path):
     ).run("Responda somente: dois")
 
     assert resumed.metadata.get("error") is not True, resumed.content
-    assert _turn_count(store, session_id) > turns_before, (
+    # The app persists the turn shortly AFTER the CLI process exits, so reading
+    # once is a false failure -- measured, and the source of a day spent chasing
+    # "no new turn recorded". Poll instead.
+    assert _turn_lands(store, session_id, turns_before), (
         "resume produced no new turn in the target session"
     )
     assert _session_ids(store) == sessions_before, (
         "resume created a new session instead of appending to the target"
     )
+
+
+def _turn_lands(store, session_id: str, before: int, timeout: float = 60.0) -> bool:
+    import time
+
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if _turn_count(store, session_id) > before:
+            return True
+        time.sleep(1.0)
+    return False
+
+
+@pytest.mark.contract
+def test_a_headless_session_can_actually_invoke_an_mcp_tool(tmp_path):
+    """Listing a tool is not having it -- the third time this bill came due.
+
+    Twice already the lesson was written down: to prove a permission holds, the
+    test must EXERCISE it. Twice it was proved by hand and not by code, and the
+    second time the guarantee shipped FALSE -- the session listed all seven
+    ata-ao-vivo tools and then died on the first call with
+
+        Permission denied and could not request permission from user
+
+    A headless child runs with --no-ask-user and has nobody to ask, so
+    --additional-mcp-config alone grants tools the agent can see, plan around,
+    and never use. Nothing structural stopped a third repeat; this is that
+    something.
+
+    Opt-in like the other contract probes -- it spends real quota and needs the
+    owner's own bridge config -- but it fails LOUDLY when the permission model
+    changes, instead of waiting for a session to quietly do less than asked.
+    """
+    _require_real_cli()
+
+    from openjarvis.tools.mcp_bridge_config import build_config
+
+    servers = build_config()["mcpServers"]
+    if "ata-ao-vivo" not in servers:
+        pytest.skip("this machine's bridge does not carry ata-ao-vivo")
+
+    from openjarvis.tools.copilot_ide import CopilotIdeTool
+
+    result = CopilotIdeTool().execute(
+        action="open",
+        prompt=(
+            "CHAME a ferramenta ata_estado (sem argumentos) e responda em UMA "
+            "linha comecando com RESULTADO: seguido do que ela devolveu. Se a "
+            "chamada falhar por qualquer motivo, responda FALHOU: <erro>."
+        ),
+        cwd=str(tmp_path),
+    )
+
+    assert result.success, result.content
+    answer = str(result.content)
+    assert "FALHOU" not in answer, answer
+    # The daemon always answers with an `aviso` or an `itens` count; either one
+    # is proof the call reached it and came back.
+    assert "aviso" in answer or "itens" in answer, answer
 
 
 def _require_real_cli() -> None:
