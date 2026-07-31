@@ -293,6 +293,12 @@ class ConductorService:
                 claim.key, claim.claim_token, reason=f"awaiting approval ({tier})"
             )
             report.pending.append(TickOutcome(snapshot.session_id, "pending", tier))
+            # A queued approval nobody hears about is a dead end: the session
+            # waits forever for a decision the owner does not know he owes.
+            self._notify(
+                f"A sessao {snapshot.summary or snapshot.session_id} precisa "
+                f"da sua decisao ({tier}) para eu retomar."
+            )
             return
 
         self._execute(claim, snapshot, detail, tier, report)
@@ -529,6 +535,15 @@ class ConductorService:
     ) -> None:
         self._claims.mark_conflict(claim.key, claim.claim_token, detail=reason)
         report.conflicts.append(TickOutcome(snapshot.session_id, "conflict", reason))
+
+    def _notify(self, message: str) -> None:
+        """Tell the owner something, without letting the messenger break the tick."""
+        if self._notifier is None:
+            return
+        try:
+            self._notifier.notify(message)
+        except Exception:  # noqa: BLE001 - a failed notification is not a failed tick
+            logger.debug("conductor notification failed", exc_info=True)
 
     def _announce(self, snapshot: SessionSnapshot, result: ResumeResult) -> None:
         if self._notifier is None:

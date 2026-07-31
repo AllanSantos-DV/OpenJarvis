@@ -212,7 +212,7 @@ class CopilotCliAgent(BaseAgent):
         """Assemble the ``copilot`` argv for one turn.
 
         Secure by default: unless ``allow_all_tools=True`` was explicitly
-        requested, the CLI is launched with ``--available-tools=`` (an empty
+        requested, the CLI is launched with the dangerous built-ins denied by
         name and MCP servers disabled, rather than the blanket ``--allow-all-tools``.
         No permission is ever inferred from ``prompt`` -- only from the
         agent's own constructor-time configuration.

@@ -593,3 +593,58 @@ def test_working_session_is_never_promoted(claims, tmp_path, monkeypatch):
     report = _service(reader, claims, executor, promotion=PromotionPolicy()).tick()
 
     assert [o.action for o in report.answered] == ["answered"]
+
+
+def test_pending_approval_tells_the_owner(claims):
+    """A queued approval nobody hears about is a dead end.
+
+    The session would wait forever for a decision the owner does not know he
+    owes, and the conductor would look like it silently gave up.
+    """
+    from openjarvis.conductor.policy import TierPolicy
+
+    class Recorder:
+        def __init__(self):
+            self.messages = []
+
+        def notify(self, message):
+            self.messages.append(message)
+
+    snap = _snapshot(turns=20)
+    reader = FakeReader([snap], {snap.session_id: _detail(snap)})
+    notifier = Recorder()
+
+    report = _service(
+        reader,
+        claims,
+        FakeExecutor(reader),
+        tiers=TierPolicy(trivial_max_turns=0),
+        approvals=RecordingGate(allow=False),
+        notifier=notifier,
+    ).tick()
+
+    assert report.pending
+    assert notifier.messages, "owner was never told a decision is waiting"
+    assert "decisao" in notifier.messages[0]
+
+
+def test_a_failing_notifier_does_not_break_the_tick(claims):
+    class Broken:
+        def notify(self, message):
+            raise RuntimeError("speaker offline")
+
+    from openjarvis.conductor.policy import TierPolicy
+
+    snap = _snapshot(turns=20)
+    reader = FakeReader([snap], {snap.session_id: _detail(snap)})
+
+    report = _service(
+        reader,
+        claims,
+        FakeExecutor(reader),
+        tiers=TierPolicy(trivial_max_turns=0),
+        approvals=RecordingGate(allow=False),
+        notifier=Broken(),
+    ).tick()
+
+    assert report.pending
