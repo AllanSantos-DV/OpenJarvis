@@ -33,6 +33,7 @@ from pathlib import Path
 from typing import Any, List, Optional
 
 from openjarvis.core.registry import SpeechRegistry, TTSRegistry
+from openjarvis.speech._stubs import SpeechBackend, TranscriptionResult
 from openjarvis.speech.tts import TTSBackend, TTSResult
 
 logger = logging.getLogger(__name__)
@@ -156,7 +157,7 @@ _TRANSCRIBE_ARGS = frozenset(
 
 
 @SpeechRegistry.register("vox-engine")
-class VoxEngineSpeechBackend(_VoxDaemonMixin):
+class VoxEngineSpeechBackend(_VoxDaemonMixin, SpeechBackend):
     """Speech-to-text backend delegating to the vox-engine daemon."""
 
     backend_id = "vox-engine"
@@ -176,25 +177,30 @@ class VoxEngineSpeechBackend(_VoxDaemonMixin):
         self,
         audio: Any,
         *,
-        language: str = "",
+        format: str = "wav",  # noqa: A002 -- the interface declares this name
+        language: Optional[str] = None,
         profile: str = "",
         **kwargs: Any,
-    ) -> dict:
-        """Transcribe audio and return ``{"text": ...}``.
+    ) -> TranscriptionResult:
+        """Transcribe audio and return a :class:`TranscriptionResult`.
 
         Uses the SDK's ``transcribe_file`` track so recordings longer than
         Whisper's ~30s window are segmented by the daemon instead of being
         truncated. Without an explicit *profile* the engine picks the fast
         ``transcription`` one; pass ``transcription_hq`` for difficult audio.
 
-        Callers come from a generic speech interface and pass whatever their own
-        backend understood -- ``format="wav"``, ``sample_rate``, and so on.
-        Forwarding those blindly makes the SDK raise ``unexpected keyword
-        argument``, which surfaces to the user as "Speech transcription failed"
-        with no hint that the audio was fine and only the call was wrong.
-        Measured, in the owner's face. Only arguments this SDK actually accepts
-        are passed through; the rest are dropped, and logged once so a genuinely
-        needed one is not lost in silence.
+        This signature is the one :class:`SpeechBackend` declares, and getting
+        it wrong cost the owner a live failure: the class did not inherit the
+        ABC, so nothing checked it. ``format`` fell into ``**kwargs`` and was
+        forwarded to an SDK that has no such argument, and the endpoint's
+        ``result.text`` met a plain dict. Both surfaced as one opaque
+        "Speech transcription failed (500)".
+
+        ``format`` is accepted and ignored on purpose: the daemon sniffs the
+        container itself, so the hint is genuinely unnecessary here -- but
+        declaring it is what keeps a caller honouring the interface from
+        breaking. Any other unexpected argument is dropped and logged rather
+        than forwarded.
         """
         client = self._ensure_client()
         chosen = profile or self._profile
@@ -212,7 +218,20 @@ class VoxEngineSpeechBackend(_VoxDaemonMixin):
             session=self._session,
             **accepted,
         )
-        return {"text": text}
+        return TranscriptionResult(
+            text=text,
+            language=language or self._language or None,
+        )
+
+    def supported_formats(self) -> List[str]:
+        """Containers the daemon accepts.
+
+        Part of the interface, and it was missing entirely -- which is the
+        clearest evidence that this class never really implemented it. The
+        daemon reads the container itself, so this is what it decodes rather
+        than a filter applied here.
+        """
+        return ["wav", "mp3", "flac", "ogg", "opus", "m4a", "webm"]
 
     def health(self) -> bool:
         """True when the engine is already running with its STT model loaded."""

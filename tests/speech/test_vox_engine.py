@@ -5,6 +5,7 @@ from __future__ import annotations
 import pytest
 
 from openjarvis.core.registry import SpeechRegistry, TTSRegistry
+from openjarvis.speech._stubs import TranscriptionResult
 from openjarvis.speech.vox_engine import (
     VoxEngineSpeechBackend,
     VoxEngineTTSBackend,
@@ -135,7 +136,7 @@ def test_transcribe_uses_transcribe_file_for_long_audio():
     name, kwargs = client.calls[0]
     assert name == "transcribe_file"
     assert kwargs["lang"] == "pt"
-    assert result == {"text": "ok"}
+    assert result.text == "ok"
 
 
 def test_transcribe_passes_profile_only_when_set():
@@ -167,7 +168,7 @@ def test_transcribe_drops_kwargs_the_sdk_does_not_accept():
     _, kwargs = client.calls[0]
     assert "format" not in kwargs
     assert "sample_rate" not in kwargs
-    assert result == {"text": "ok"}
+    assert result.text == "ok"
 
 
 def test_transcribe_keeps_the_kwargs_the_sdk_does_accept():
@@ -181,6 +182,42 @@ def test_transcribe_keeps_the_kwargs_the_sdk_does_accept():
     assert kwargs["lang"] == "pt"
     assert kwargs["profile"] == "transcription_hq"
     assert kwargs["timeout"] == 60
+
+
+def test_the_stt_backend_really_implements_the_interface():
+    """Nothing checked this, and that is exactly how it broke live.
+
+    The class did not inherit ``SpeechBackend``, so Python never enforced the
+    ABC. Two contract violations shipped: ``format`` was undeclared (so it fell
+    into ``**kwargs`` and was forwarded to an SDK with no such argument), and
+    the return was a plain dict where the caller does ``result.text``. Both
+    reached the owner as one opaque "Speech transcription failed (500)".
+    """
+    from openjarvis.speech._stubs import SpeechBackend
+
+    assert issubclass(VoxEngineSpeechBackend, SpeechBackend)
+
+
+def test_transcribe_accepts_the_declared_signature():
+    """`format` is part of the interface, not junk to tolerate.
+
+    The caller is right to pass it; the daemon sniffs the container itself, so
+    it is accepted and ignored -- but declaring it is what keeps a caller
+    honouring the interface from breaking.
+    """
+    client = _FakeClient()
+    stt = _attach(VoxEngineSpeechBackend(), client)
+
+    result = stt.transcribe(b"audio", format="mp3", language="pt")
+
+    assert isinstance(result, TranscriptionResult)
+    assert result.text == "ok"
+    assert result.language == "pt"
+    assert "format" not in client.calls[0][1]
+
+
+def test_supported_formats_is_answered_not_declared_empty():
+    assert "wav" in VoxEngineSpeechBackend().supported_formats()
 
 
 def test_health_probe_never_installs(monkeypatch):
