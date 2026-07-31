@@ -1,0 +1,4 @@
+#!/bin/sh
+# Git runs this with its bundled sh; hand over to node, which is where the
+# logic lives. Forward every argument -- git passes the remote name and URL.
+exec node "$(dirname "$0")/pre-push.cjs" "$@"

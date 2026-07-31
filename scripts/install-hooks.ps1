@@ -21,34 +21,37 @@ param([switch]$Remove)
 
 $ErrorActionPreference = 'Stop'
 $repoRoot = Split-Path -Parent $PSScriptRoot
-$hookPath = Join-Path $repoRoot '.git\hooks\pre-push'
-$runner = Join-Path $PSScriptRoot 'hooks\pre-push.cjs'
+$hooksDir = Join-Path $repoRoot '.githooks'
 
 if ($Remove) {
-    if (Test-Path $hookPath) {
-        Remove-Item $hookPath -Force
-        Write-Host 'pre-push removido.' -ForegroundColor Yellow
-    }
+    git -C $repoRoot config --unset core.hooksPath 2>&1 | Out-Null
+    Write-Host 'core.hooksPath local removido (volta ao global da maquina).' -ForegroundColor Yellow
     exit 0
 }
 
-if (-not (Test-Path $runner)) {
-    Write-Host "hook nao encontrado em $runner" -ForegroundColor Red
+if (-not (Test-Path (Join-Path $hooksDir 'pre-push.cjs'))) {
+    Write-Host "hooks nao encontrados em $hooksDir" -ForegroundColor Red
     exit 2
 }
 if (-not (Get-Command node -ErrorAction SilentlyContinue)) {
-    Write-Host 'node nao esta no PATH -- o hook precisa dele.' -ForegroundColor Red
+    Write-Host 'node nao esta no PATH -- os hooks precisam dele.' -ForegroundColor Red
     exit 2
 }
 
-New-Item -ItemType Directory -Path (Split-Path $hookPath) -Force | Out-Null
-# Git runs hooks through sh even on Windows, so the shim is a shell script that
-# hands over to node. Forward every argument: git passes the remote and URL.
-@"
-#!/bin/sh
-exec node "$($runner -replace '\\', '/')" "`$@"
-"@ | Set-Content $hookPath -NoNewline -Encoding utf8
+# Point Git at the repo's own hooks directory.
+#
+# Writing to .git/hooks would be useless here: this machine sets core.hooksPath
+# GLOBALLY, so Git ignores .git/hooks entirely. The global dispatcher tries to
+# delegate to the local hook, but on Windows it spawns the shell script directly
+# and gets ENOENT -- status comes back null, `null ?? 0` becomes exit 0, and the
+# local gate silently never runs. Measured, after shipping a gate that could
+# never fire.
+#
+# Taking over loses nothing: .githooks/pre-push.cjs runs the machine-wide
+# dispatcher first and honours its veto.
+git -C $repoRoot config core.hooksPath '.githooks'
 
-Write-Host "pre-push instalado em $hookPath" -ForegroundColor Green
+Write-Host "core.hooksPath -> .githooks" -ForegroundColor Green
 Write-Host '  Antes de cada push que toque a camada do Jarvis, os contract tests' -ForegroundColor DarkGray
-Write-Host '  rodam contra o CLI real. Pule com: git push --no-verify' -ForegroundColor DarkGray
+Write-Host '  rodam contra o CLI real. As regras globais da maquina continuam valendo.' -ForegroundColor DarkGray
+Write-Host '  Pular: git push --no-verify' -ForegroundColor DarkGray
