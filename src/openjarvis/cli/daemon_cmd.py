@@ -37,6 +37,11 @@ def _write_pid(pid: int) -> None:
     _PID_FILE.write_text(str(pid))
 
 
+def _clear_pid() -> None:
+    """Drop the pid file after a failed start, so it never points at nothing."""
+    _PID_FILE.unlink(missing_ok=True)
+
+
 @click.group()
 def daemon() -> None:
     """Manage the OpenJarvis server daemon."""
@@ -106,11 +111,114 @@ def start(
     )
     _write_pid(proc.pid)
 
+    problem = _wait_until_serving(proc, bind_host, bind_port)
+    if problem:
+        _clear_pid()
+        console.print(f"[red]O servidor nao subiu.[/red]\n{problem}")
+        console.print(f"  Log completo: {_LOG_FILE}")
+        sys.exit(1)
+
     console.print(
         f"[green]OpenJarvis server started[/green] (PID {proc.pid})\n"
         f"  URL: http://{bind_host}:{bind_port}\n"
         f"  Log: {_LOG_FILE}"
     )
+
+
+#: Cold start imports the whole app graph; this is generous enough for a slow
+#: machine and short enough that a real failure is not mistaken for slowness.
+_BOOT_TIMEOUT = 45.0
+
+#: Import errors the server dies on, mapped to what actually fixes them. A
+#: traceback in a log file the owner never opens is the same as no message.
+_KNOWN_CAUSES = (
+    (
+        "python-multipart",
+        "Falta a dependencia python-multipart. Instale os extras do servidor:\n"
+        # The brackets are escaped for rich, which would otherwise read
+        # `[server]` as markup and silently drop the very part that matters.
+        '  uv pip install "openjarvis\\[server]"',
+    ),
+    (
+        "No module named 'polars'",
+        "Falta o polars (usado pelos relatorios). Instale com:\n"
+        "  uv pip install polars",
+    ),
+    (
+        "Address already in use",
+        "A porta ja esta ocupada. Use --port outra, ou pare o processo que a usa.",
+    ),
+)
+
+
+def _wait_until_serving(proc, host: str, port: int) -> str:
+    """Block until the daemon answers, and explain it if it never does.
+
+    ``Popen`` returning is not the server working: it dies moments later on a
+    missing import, having already printed "started" with a pid. The owner then
+    has a pid file pointing at nothing and no idea why -- which is exactly how a
+    missing ``python-multipart`` cost a day here.
+
+    The check is bound to the process we spawned, not merely to the port. An
+    earlier run that outlived its pid file still answers on that port, and a
+    port-only probe reports success while OUR process is already dead -- measured
+    here, the first version of this check did exactly that.
+
+    Returns "" when the server is up, or a message naming the cause.
+    """
+    import time
+    import urllib.error
+    import urllib.request
+
+    url = f"http://{host}:{port}/docs"
+    deadline = time.monotonic() + _BOOT_TIMEOUT
+
+    while time.monotonic() < deadline:
+        if proc.poll() is not None:
+            return _explain_log()
+        answered = False
+        try:
+            with urllib.request.urlopen(url, timeout=2):
+                answered = True
+        except urllib.error.HTTPError:
+            # Any HTTP answer means an app is serving; the path may not exist.
+            answered = True
+        except Exception:  # noqa: BLE001 -- not up yet
+            time.sleep(0.5)
+
+        if answered:
+            # Something is serving -- but is it ours? Give a dying child a
+            # moment to actually die, then insist it is still alive.
+            time.sleep(1.0)
+            if proc.poll() is not None:
+                return (
+                    "Outro processo ja responde nessa porta, e o servidor que "
+                    "acabou de subir morreu.\n" + _explain_log()
+                )
+            return ""
+
+    if proc.poll() is not None:
+        return _explain_log()
+    return (
+        f"O processo continua vivo mas nao respondeu em {int(_BOOT_TIMEOUT)}s.\n"
+        "Veja o log para saber em que ponto ele parou."
+    )
+
+
+def _explain_log() -> str:
+    """Turn the tail of the log into something worth reading."""
+    try:
+        tail = _LOG_FILE.read_text(encoding="utf-8", errors="replace")[-4000:]
+    except OSError:
+        return "O processo morreu e o log nao pode ser lido."
+
+    for needle, advice in _KNOWN_CAUSES:
+        if needle in tail:
+            return advice
+
+    lines = [line for line in tail.splitlines() if line.strip()]
+    last = "\n".join(f"  {line}" for line in lines[-6:])
+    return f"O processo morreu logo apos iniciar. Fim do log:\n{last}"
 
 
 @daemon.command()
