@@ -24,6 +24,27 @@ try {
   /* no stdin: a manual run */
 }
 
+// A failed spawn is NOT a pass. `spawnSync` returns status null when the
+// process could never start, and `null ?? 0` quietly turns that into success --
+// the exact bug that made the machine's dispatcher unable to reach this repo's
+// hook, reproduced here one file later if left unguarded.
+function runOrFail(script, label) {
+  const res = spawnSync(process.execPath, [script, ...args], {
+    input: stdin,
+    stdio: ["pipe", "inherit", "inherit"],
+  });
+  if (res.error || res.status === null) {
+    console.error(
+      `\n[pre-push] o portao "${label}" nao pode ser executado ` +
+        `(${res.error ? res.error.code : "sem status"}).\n` +
+        "  Um portao que nao roda nao aprova nada. Corrija, ou use --no-verify\n" +
+        "  assumindo o risco conscientemente."
+    );
+    process.exit(1);
+  }
+  return res.status;
+}
+
 // 1. The machine-wide gate. It enforces rules unrelated to this repo and must
 //    keep working.
 const globalDispatch = join(
@@ -33,21 +54,18 @@ const globalDispatch = join(
   "dispatch.mjs"
 );
 if (existsSync(globalDispatch)) {
-  const res = spawnSync(process.execPath, [globalDispatch, ...args], {
-    input: stdin,
-    stdio: ["pipe", "inherit", "inherit"],
-  });
-  if (res.status) process.exit(res.status);
+  const status = runOrFail(globalDispatch, "global da maquina");
+  if (status) process.exit(status);
 }
 
 // 2. This repo's gate: the contract tests CI structurally cannot run.
 const own = join(__dirname, "..", "scripts", "hooks", "pre-push.cjs");
-if (existsSync(own)) {
-  const res = spawnSync(process.execPath, [own, ...args], {
-    input: stdin,
-    stdio: ["pipe", "inherit", "inherit"],
-  });
-  process.exit(res.status ?? 0);
+if (!existsSync(own)) {
+  console.error(
+    `\n[pre-push] o portao do repositorio nao foi encontrado em ${own}.\n` +
+      "  Sem ele os contract tests nao rodam em lugar nenhum -- o CI nao tem\n" +
+      "  como roda-los. Restaure o arquivo ou use --no-verify."
+  );
+  process.exit(1);
 }
-
-process.exit(0);
+process.exit(runOrFail(own, "do repositorio"));

@@ -26,7 +26,17 @@ if (existsSync(globalHook)) {
   const res = spawnSync(process.execPath, [globalHook, ...args], {
     stdio: "inherit",
   });
-  process.exit(res.status ?? 0);
+  // A gate that could not run has not approved anything. `status ?? 0` would
+  // turn a failed spawn into a clean pass -- the bug that made this repo's own
+  // pre-push unreachable for a whole commit.
+  if (res.error || res.status === null) {
+    console.error(
+      "\n[commit-msg] a regra global da maquina nao pode ser executada " +
+        `(${res.error ? res.error.code : "sem status"}).`
+    );
+    process.exit(1);
+  }
+  process.exit(res.status);
 }
 
 process.exit(0);
