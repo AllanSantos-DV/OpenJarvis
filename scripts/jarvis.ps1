@@ -34,7 +34,10 @@ param(
     [switch]$InstallShortcut,
     [switch]$Stop,
     [switch]$NoWindow,
-    [switch]$Watch
+    [switch]$Watch,
+    # Set by the shortcut and the logon task, which run with no visible console.
+    # A failure there has to reach the screen some other way.
+    [switch]$Hidden
 )
 
 $ErrorActionPreference = 'Stop'
@@ -45,25 +48,32 @@ $url = 'http://127.0.0.1:8000'
 
 function Fail([string]$message) {
     Write-Host "jarvis: $message" -ForegroundColor Red
+    # The shortcut runs this with -WindowStyle Hidden, so there is no console to
+    # read: a failure would vanish and the owner would be left clicking an icon
+    # that does nothing, with no idea why. Never fail silently -- if nobody can
+    # see the console, put it on screen.
+    if ($Hidden) {
+        try {
+            Add-Type -AssemblyName System.Windows.Forms -ErrorAction Stop
+            [System.Windows.Forms.MessageBox]::Show(
+                "$message`n`nLog: $env:USERPROFILE\.openjarvis\server.log",
+                'Jarvis nao subiu',
+                [System.Windows.Forms.MessageBoxButtons]::OK,
+                [System.Windows.Forms.MessageBoxIcon]::Error
+            ) | Out-Null
+        } catch {
+            # Even the dialog can fail. Leave a file the owner can find.
+            $note = Join-Path $env:USERPROFILE 'jarvis-nao-subiu.txt'
+            "$([DateTime]::Now)  $message" | Set-Content $note -Encoding utf8
+        }
+    }
     exit 2
 }
 
-function Test-Server {
-    # /health, not /docs: the docs UI can be turned off in a hardened setup, and
-    # then the launcher would report "offline" with a perfectly live backend.
-    #
-    # And a raw TcpClient, not Invoke-WebRequest. Measured twice, after the
-    # launcher reported the server down while its log showed six 200s:
-    #   * Invoke-WebRequest throws NullReferenceException under
-    #     `powershell -File` (no profile, which is how the shortcut runs it) --
-    #     it parses the body for the legacy HTML DOM and falls over on a
-    #     perfectly good response. It works interactively, which is what makes
-    #     it a trap.
-    #   * [System.Net.Http.HttpClient] is not loaded in Windows PowerShell 5.1,
-    #     so reaching for it just moved the failure.
-    #
-    # The question is only "is something listening and accepting". A socket
-    # answers exactly that, with nothing in between to misbehave.
+function Test-Port {
+    # Cheap pre-check: is anything listening at all? Answers in microseconds
+    # when nothing is there, so the wait loop does not pay for an HTTP timeout
+    # on every attempt during the ~12s cold start.
     $probe = New-Object System.Net.Sockets.TcpClient
     try {
         $probe.Connect('127.0.0.1', 8000)
@@ -72,6 +82,31 @@ function Test-Server {
         return $false
     } finally {
         $probe.Close()
+    }
+}
+
+function Test-Server {
+    # An open port is not a ready app: uvicorn binds before the application
+    # finishes starting, so a window opened on "port is up" can still meet a
+    # backend that is not answering. The question is whether /health returns.
+    #
+    # [System.Net.WebRequest], not Invoke-WebRequest. Measured, after the
+    # launcher declared a live server dead while its log showed six 200s:
+    # Invoke-WebRequest throws NullReferenceException under `powershell -File`
+    # with no profile -- which is how the shortcut runs it -- because it parses
+    # the body for the legacy HTML DOM. It works interactively, which is what
+    # makes it a trap. [System.Net.Http.HttpClient] is not loaded in Windows
+    # PowerShell 5.1, so that was not the way out either.
+    if (-not (Test-Port)) { return $false }
+    try {
+        $request = [System.Net.WebRequest]::Create("$url/health")
+        $request.Timeout = 3000
+        $response = $request.GetResponse()
+        $code = [int]$response.StatusCode
+        $response.Close()
+        return ($code -ge 200 -and $code -lt 300)
+    } catch {
+        return $false
     }
 }
 
@@ -100,7 +135,7 @@ if ($InstallShortcut) {
     # -WindowStyle Hidden: the launcher has nothing to show. The Jarvis window is
     # the product; a console sitting behind it is noise.
     $shortcut.Arguments =
-        "-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$PSCommandPath`" -Watch"
+        "-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$PSCommandPath`" -Watch -Hidden"
     $shortcut.WorkingDirectory = $repoRoot
     $shortcut.Description = 'Abre o Jarvis'
     if (Test-Path $app) { $shortcut.IconLocation = $app }
