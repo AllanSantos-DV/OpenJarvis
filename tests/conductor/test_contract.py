@@ -42,7 +42,7 @@ CREATE TABLE session_files (
 
 @pytest.mark.contract
 def test_copilot_cli_output_contract_with_disposable_profile(tmp_path):
-    _require_real_cli()
+    _require_real_cli(isolated_profile=True)
 
     profile = tmp_path / "profile"
     store = profile / ".copilot" / "session-store.db"
@@ -87,7 +87,7 @@ def test_resume_appends_to_the_same_session(tmp_path):
     canonical proof: a new turn lands in the SAME session id, and no extra
     session appears in the store.
     """
-    _require_real_cli()
+    _require_real_cli(isolated_profile=True)
 
     profile = tmp_path / "profile"
     (profile / ".copilot").mkdir(parents=True)
@@ -197,19 +197,34 @@ def test_a_headless_session_can_actually_invoke_an_mcp_tool(tmp_path):
     assert "aviso" in answer or "itens" in answer, answer
 
 
-def _require_real_cli() -> None:
+def _require_real_cli(*, isolated_profile: bool = False) -> None:
     """Skip unless this machine can genuinely exercise the CLI.
 
-    Deliberately does NOT demand GH_TOKEN/GITHUB_TOKEN. The owner authenticates
-    through `copilot login`, whose credential lives in the system store -- and
-    a shell started from a shortcut never has that variable, because the app
-    injects it into its own process. Demanding it skipped every run on a machine
-    that works, which turns a gate into decoration.
+    Deliberately does NOT demand GH_TOKEN/GITHUB_TOKEN by itself: the owner
+    authenticates through `copilot login`, whose credential lives in the system
+    store, and a shell started from a shortcut never has that variable because
+    the app injects it into its own process. Demanding it skipped every run on a
+    machine that works, which turns a gate into decoration.
+
+    ``isolated_profile`` marks the tests that redirect HOME/USERPROFILE to a
+    throwaway directory. Measured: that redirection cuts the CLI off from the
+    stored credential, so it falls back to an account with no quota and the test
+    fails for a reason that has nothing to do with the code. Those runs need an
+    ambient token, which survives the redirection -- so they say so and skip
+    when it is absent, instead of reporting a false breakage.
     """
     if os.environ.get("RUN_COPILOT_CONTRACT") != "1":
         pytest.skip("set RUN_COPILOT_CONTRACT=1 to spend real Copilot quota")
     if not is_copilot_cli_available():
         pytest.skip("Copilot CLI binary is not on PATH")
+
+    if isolated_profile and not (
+        os.environ.get("GH_TOKEN") or os.environ.get("GITHUB_TOKEN")
+    ):
+        pytest.skip(
+            "this test redirects HOME, which hides the stored credential; "
+            "it needs GH_TOKEN/GITHUB_TOKEN in the environment"
+        )
 
     from openjarvis.conductor.runner import _cli_authenticates
 
