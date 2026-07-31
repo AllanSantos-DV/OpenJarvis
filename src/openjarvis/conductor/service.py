@@ -274,10 +274,12 @@ class ConductorService:
 
         tier = self._tiers.classify(snapshot, next_steps=detail.next_steps)
         if not self._authorised(snapshot, detail, tier, fingerprint):
-            # Leave it for a human; release the lease so the next tick can pick
-            # it up once the decision arrives.
-            self._claims.mark_failed(
-                claim.key, claim.claim_token, error=f"awaiting approval ({tier})"
+            # Leave it for a human. Releasing (instead of failing) is what lets
+            # the tick that finally sees the approval act on it: a failure would
+            # spend an attempt and park the work behind a backoff, so the
+            # approval would look ignored.
+            self._claims.release(
+                claim.key, claim.claim_token, reason=f"awaiting approval ({tier})"
             )
             report.pending.append(TickOutcome(snapshot.session_id, "pending", tier))
             return

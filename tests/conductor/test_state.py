@@ -251,3 +251,33 @@ def test_separate_processes_share_state_through_the_file(tmp_path, clock):
     finally:
         a.close()
         b.close()
+
+
+def test_release_does_not_spend_an_attempt_or_set_backoff(store, clock):
+    """Waiting on a human is not a failed attempt.
+
+    Failing the claim here would burn a retry and park the work behind a backoff,
+    so the tick that finally sees the approval could not act on it -- the owner's
+    decision would look ignored.
+    """
+    fp = _fp()
+    claim = store.acquire(fp, "owner-a")
+    assert claim.attempts == 1
+
+    released = store.release(claim.key, claim.claim_token, reason="awaiting approval")
+
+    assert released.state == OBSERVED
+    assert released.attempts == 0
+    assert released.retry_at == 0
+
+    # Immediately claimable again: no backoff was imposed.
+    again = store.acquire(fp, "owner-a")
+    assert again is not None
+
+
+def test_release_rejects_a_stale_token(store):
+    fp = _fp()
+    claim = store.acquire(fp, "owner-a")
+
+    with pytest.raises(StaleClaimError):
+        store.release(claim.key, "not-my-token")

@@ -406,6 +406,36 @@ class SqliteClaimStore:
             row = self._fetch(conn, key)
         return _row_to_claim(row)
 
+    def release(self, key: str, claim_token: str, *, reason: str = "") -> Claim:
+        """Hand the claim back untouched: no attempt spent, no backoff.
+
+        Waiting for a human decision is not a failed attempt. Marking it as one
+        would burn a retry and park the work behind a backoff, so the tick that
+        finally sees the approval could not act on it -- the approval would look
+        ignored.
+        """
+        with self._immediate() as conn:
+            row = self._fetch(conn, key)
+            if row is None or row["claim_token"] != claim_token:
+                raise StaleClaimError(f"Claim {key!r} is not held by {claim_token!r}")
+            conn.execute(
+                "UPDATE claims SET state = ?, claim_token = '', lease_expires_at = 0,"
+                " retry_at = 0, attempts = MAX(attempts - 1, 0), updated_at = ?,"
+                " last_error = ? WHERE key = ? AND claim_token = ?",
+                (OBSERVED, self._clock(), reason, key, claim_token),
+            )
+            self._log(
+                conn,
+                key,
+                row["session_id"],
+                "released",
+                owner=row["owner"],
+                claim_token=claim_token,
+                detail=reason,
+            )
+            row = self._fetch(conn, key)
+        return _row_to_claim(row)
+
     def mark_running(self, key: str, claim_token: str) -> Claim:
         return self._transition(
             key,
